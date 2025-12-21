@@ -7,10 +7,10 @@ const anthropic = new Anthropic({
 
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 
-async function getSlackMessages() {
+async function getSlackMessages(days = 7) {
   try {
     const now = Math.floor(Date.now() / 1000);
-    const yesterday = now - 86400; // 24시간 전
+    const startTime = now - (86400 * days); // days일 전
 
     const channelsResult = await slack.conversations.list({
       types: 'public_channel,private_channel',
@@ -19,33 +19,62 @@ async function getSlackMessages() {
 
     let allMessages = [];
     let channelStats = {};
+    let dailyStats = {};
+    let userActivity = {};
+
+    // 날짜별 통계 초기화
+    for (let i = 0; i < days; i++) {
+      const date = new Date(now * 1000 - i * 86400000).toISOString().split('T')[0];
+      dailyStats[date] = { messages: 0, channels: new Set() };
+    }
 
     for (const channel of channelsResult.channels) {
       try {
         const history = await slack.conversations.history({
           channel: channel.id,
-          oldest: yesterday,
+          oldest: startTime,
           latest: now,
+          limit: 1000, // 최대 1000개
         });
 
         channelStats[channel.name] = {
           messageCount: history.messages.length,
           participants: new Set(),
+          lastActive: null,
         };
 
-        const messagesWithContext = history.messages.map(msg => {
+        history.messages.forEach(msg => {
+          // 날짜별 통계
+          const msgDate = new Date(parseFloat(msg.ts) * 1000).toISOString().split('T')[0];
+          if (dailyStats[msgDate]) {
+            dailyStats[msgDate].messages++;
+            dailyStats[msgDate].channels.add(channel.name);
+          }
+
+          // 사용자 활동
           if (msg.user) {
             channelStats[channel.name].participants.add(msg.user);
+            if (!userActivity[msg.user]) {
+              userActivity[msg.user] = { messages: 0, channels: new Set() };
+            }
+            userActivity[msg.user].messages++;
+            userActivity[msg.user].channels.add(channel.name);
           }
-          return {
-            channel: channel.name,
-            user: msg.user,
-            text: msg.text || '',
-            timestamp: msg.ts,
-            thread_ts: msg.thread_ts,
-            reactions: msg.reactions || [],
-          };
+
+          // 마지막 활동 시간
+          if (!channelStats[channel.name].lastActive || parseFloat(msg.ts) > channelStats[channel.name].lastActive) {
+            channelStats[channel.name].lastActive = parseFloat(msg.ts);
+          }
         });
+
+        const messagesWithContext = history.messages.map(msg => ({
+          channel: channel.name,
+          user: msg.user,
+          text: msg.text || '',
+          timestamp: msg.ts,
+          thread_ts: msg.thread_ts,
+          reactions: msg.reactions || [],
+        }));
 
         allMessages = allMessages.concat(messagesWithContext);
       } catch (err) {
@@ -56,6 +85,11 @@ async function getSlackMessages() {
     // 참여자 수를 숫자로 변환
     Object.keys(channelStats).forEach(ch => {
       channelStats[ch].participants = channelStats[ch].participants.size;
+    });
+
+    // 날짜별 채널 수 변환
+    Object.keys(dailyStats).forEach(date => {
+      dailyStats[date].channels = dailyStats[date].channels.size;
     });
 
     const usersResult = await slack.users.list();
@@ -69,89 +103,130 @@ async function getSlackMessages() {
       userName: userMap[msg.user] || '알 수 없음',
     }));
 
-    return { messages: allMessages, channelStats, userMap };
+    return { messages: allMessages, channelStats, dailyStats, userActivity, userMap };
   } catch (error) {
     console.error('Slack 메시지 가져오기 실패:', error);
-    return { messages: [], channelStats: {}, userMap: {} };
+    return { messages: [], channelStats: {}, dailyStats: {}, userActivity: {}, userMap: {} };
   }
 }
 
 async function analyzeWithClaude(data) {
-  const { messages, channelStats } = data;
+  const { messages, channelStats, dailyStats, userActivity, userMap } = data;
 
   if (messages.length === 0) {
-    return `📊 어제 Slack 활동 요약
+    return `📊 최근 7일 Slack 활동 요약
 
-🔇 어제는 모니터링 중인 채널에 메시지가 없었습니다.
+🔇 **최근 7일간 모니터링 중인 채널에 메시지가 없습니다.**
 
-💡 **추천 액션:**
-- 팀 활동이 줄어든 건지 확인
-- 주말이나 휴일인지 체크
-- 중요한 논의가 DM으로 넘어간 건 아닌지 점검
+⚠️ **이것은 심각한 신호일 수 있습니다:**
+- 봇이 채널에 초대되지 않았거나
+- 모든 채널 접근 권한이 없거나
+- 실제로 팀 활동이 완전히 중단됐거나
 
-내일 다시 확인하겠습니다! 👋`;
+💡 **즉시 확인할 것:**
+1. Slack에서 \`/invite @AI Monitor\` 로 봇을 주요 채널에 초대했는지
+2. 봇의 채널 접근 권한 확인
+3. 팀원들이 다른 도구로 이동했는지
+
+설정이 완료되면 다시 테스트해주세요!`;
   }
 
-  // 채널별 통계 텍스트 생성
-  let statsText = '\n📊 채널별 활동:\n';
+  // 날짜별 트렌드 텍스트
+  let trendText = '\n📈 일별 활동 추이:\n';
+  Object.entries(dailyStats)
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .forEach(([date, stats]) => {
+      trendText += `${date}: ${stats.messages}개 메시지, ${stats.channels}개 활성 채널\n`;
+    });
+
+  // 채널별 통계
+  let channelText = '\n📊 채널별 활동 (Top 10):\n';
   Object.entries(channelStats)
     .sort((a, b) => b[1].messageCount - a[1].messageCount)
     .slice(0, 10)
     .forEach(([channel, stats]) => {
-      statsText += `#${channel}: ${stats.messageCount}개 메시지, ${stats.participants}명 참여\n`;
+      const lastActive = stats.lastActive 
+        ? new Date(stats.lastActive * 1000).toLocaleDateString('ko-KR')
+        : '알 수 없음';
+      channelText += `#${channel}: ${stats.messageCount}개 메시지, ${stats.participants}명 참여, 마지막: ${lastActive}\n`;
     });
 
-  // 메시지 샘플 (최대 100개만)
-  const sampleMessages = messages
-    .slice(0, 100)
-    .map(m => `[#${m.channel}] ${m.userName}: ${m.text.substring(0, 200)}`)
+  // 활발한 사용자 Top 5
+  let userText = '\n👥 가장 활발한 사용자 (Top 5):\n';
+  Object.entries(userActivity)
+    .sort((a, b) => b[1].messages - a[1].messages)
+    .slice(0, 5)
+    .forEach(([userId, stats]) => {
+      const userName = userMap[userId] || '알 수 없음';
+      userText += `${userName}: ${stats.messages}개 메시지, ${stats.channels.size}개 채널\n`;
+    });
+
+  // 최근 메시지 샘플 (최근 50개)
+  const recentMessages = messages
+    .sort((a, b) => parseFloat(b.timestamp) - parseFloat(a.timestamp))
+    .slice(0, 50)
+    .map(m => {
+      const date = new Date(parseFloat(m.timestamp) * 1000).toLocaleDateString('ko-KR');
+      return `[${date}] #${m.channel} - ${m.userName}: ${m.text.substring(0, 150)}`;
+    })
     .join('\n');
 
-  const prompt = `당신은 CEO의 Staff입니다. 어제 Slack 대화를 분석하여 CEO가 알아야 할 핵심 내용을 요약해주세요.
+  const prompt = `당신은 CEO의 Staff입니다. 최근 7일간 Slack 대화를 분석하여 CEO가 알아야 할 핵심 내용을 요약해주세요.
 
-# 데이터
-${statsText}
+# 데이터 요약
+- 총 메시지: ${messages.length}개
+- 분석 기간: 최근 7일
+- 활성 채널: ${Object.keys(channelStats).length}개
+${trendText}
+${channelText}
+${userText}
 
-# 주요 대화 샘플
-${sampleMessages}
+# 주요 대화 샘플 (최근 50개)
+${recentMessages}
 
-# 분석 형식 (간결하게!)
+# 분석 형식
 
-📌 **긴급 이슈 (즉시 조치 필요)**
-- [채널] 이슈 제목: 요약 (1줄)
-  → 추천 액션: 구체적으로 (1줄)
+🔥 **가장 중요한 이슈 Top 3**
+1. [채널] 이슈: 간단 요약
+   - 왜 중요: 비즈니스 임팩트
+   - 추천 액션: 구체적으로
 
-⚠️ **주의 필요 (모니터링)**
-- [채널] 상황: 요약
-  → 왜 주의: 이유
-
-✅ **잘 진행 중 (칭찬/격려)**
-- [채널] 누가/무엇을: 간략히
-  → 추천: 칭찬 메시지 예시
-
-📊 **패턴 분석**
-- 반복되는 이슈나 병목
+⚠️ **주의 필요한 패턴**
+- 반복되는 문제나 병목
 - 소통 단절 징후
-- 생산성 저하 신호
+- 결정이 지연되는 이슈
 
-🎯 **오늘의 액션 아이템**
-1. 우선순위 1
-2. 우선순위 2
-3. 우선순위 3
+✅ **잘 진행되는 것**
+- 누가/무엇을 잘하고 있는지
+- 칭찬할 포인트
+
+📊 **조직 건강도 분석**
+- 활동 트렌드 (증가/감소/유지)
+- 채널별 생산성
+- 팀 사기 신호
+
+🎯 **이번 주 우선순위 액션**
+1. 
+2. 
+3. 
+
+💡 **CEO 인사이트**
+- 놓치기 쉬운 중요한 시그널
+- 조직 문화/분위기 변화
+- 전략적 시사점
 
 ---
 **분석 원칙:**
-- 비즈니스 임팩트 큰 것만
-- 감정 아닌 사실 기반
-- 구체적이고 실행 가능한 조언
-- 불필요한 세부사항 제거
-- SuperWalk/DeFi/베이직 모드 관련 특히 주의
-- 메시지가 적으면 간단하게만`;
+- 데이터 기반, 구체적 사실
+- 비즈니스 임팩트 중심
+- 실행 가능한 조언만
+- SuperWalk, DeFi, 베이직 모드, 교보 협업 관련 특히 주의
+- 긴급도 높은 것부터`;
 
   try {
     const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 3000,
+      max_tokens: 4000,
       messages: [
         {
           role: 'user',
@@ -163,15 +238,18 @@ ${sampleMessages}
     return message.content[0].text;
   } catch (error) {
     console.error('Claude 분석 실패:', error);
-    return `⚠️ AI 분석 중 오류가 발생했습니다.
+    return `⚠️ AI 분석 중 오류 발생
 
-어제 메시지: ${messages.length}개
-활성 채널: ${Object.keys(channelStats).length}개
+📊 수집된 데이터:
+- 메시지: ${messages.length}개
+- 채널: ${Object.keys(channelStats).length}개
+- 기간: 최근 7일
 
-원본 데이터는 정상적으로 수집되었으나, 
-분석 과정에서 문제가 발생했습니다.
+${channelText}
 
-에러: ${error.message}`;
+에러: ${error.message}
+
+데이터는 정상 수집되었으나 AI 분석 과정에서 문제가 발생했습니다.`;
   }
 }
 
@@ -185,7 +263,7 @@ async function sendDMToCEO(analysis) {
           type: 'header',
           text: {
             type: 'plain_text',
-            text: '📊 어제의 조직 모니터링 리포트',
+            text: '📊 최근 7일 조직 모니터링 리포트',
             emoji: true,
           },
         },
@@ -204,7 +282,7 @@ async function sendDMToCEO(analysis) {
           elements: [
             {
               type: 'mrkdwn',
-              text: `생성: ${new Date().toLocaleString('ko-KR', {timeZone: 'Asia/Seoul'})} | AI: Claude Sonnet 4`,
+              text: `생성: ${new Date().toLocaleString('ko-KR', {timeZone: 'Asia/Seoul'})} | 분석 기간: 최근 7일 | AI: Claude Sonnet 4`,
             },
           ],
         },
@@ -220,7 +298,7 @@ module.exports = async (req, res) => {
   console.log('크론 작업 시작:', new Date().toISOString());
 
   try {
-    const data = await getSlackMessages();
+    const data = await getSlackMessages(7); // 7일간 데이터
     console.log(`수집된 메시지: ${data.messages.length}개`);
 
     const analysis = await analyzeWithClaude(data);
@@ -231,6 +309,7 @@ module.exports = async (req, res) => {
       success: true,
       messagesAnalyzed: data.messages.length,
       channelsMonitored: Object.keys(data.channelStats).length,
+      period: '7 days',
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
