@@ -102,29 +102,32 @@ async function getRevenueData(days = 7) {
 
     // 실제 구조:
     // 1행: 대분류 헤더
-    // 2행: 세부 헤더 (날짜/소분류, 결제 요요, 팁포크...)
+    // 2행: 세부 헤더 (날짜/소분류, 래플 응모, 팀워크...)
     // 3행: 누적 합계 ← 이 행은 제외해야 함!
     // 4행~: 일별 데이터
+    // 마지막 컬럼(27): GRND 종가 ← 매출이 아님, 제외!
     
-    // 헤더에서 합계 컬럼 찾기
+    // 헤더 가져오기
     const headers = rows[1];
-    let totalColIndex = headers.findIndex(h => h && h.includes('합계'));
-    if (totalColIndex === -1) {
-      for (let i = headers.length - 1; i >= 0; i--) {
-        if (headers[i] && headers[i].includes('합계')) {
-          totalColIndex = i;
-          break;
-        }
-      }
-    }
-    if (totalColIndex === -1) totalColIndex = 27; // AB열
-    
-    console.log(`📊 합계 컬럼 인덱스: ${totalColIndex}`);
 
     // 주요 컬럼 인덱스 찾기
     const findCol = (keywords) => {
       return headers.findIndex(h => h && keywords.some(k => h.includes(k)));
     };
+
+    // ✅ 수정: 모든 수익 컬럼 찾기 (GRND 종가, 날짜 제외)
+    const revenueColIndexes = [];
+    const excludeKeywords = ['날짜', 'GRND', '종가', '소분류'];
+    
+    headers.forEach((header, idx) => {
+      if (!header) return;
+      const isExcluded = excludeKeywords.some(k => header.includes(k));
+      if (!isExcluded && idx > 0) {
+        revenueColIndexes.push(idx);
+      }
+    });
+    
+    console.log(`📊 수익 컬럼 인덱스들: ${revenueColIndexes.join(', ')} (총 ${revenueColIndexes.length}개)`);
 
     const COL = {
       날짜: 0, // A열
@@ -132,19 +135,24 @@ async function getRevenueData(days = 7) {
       이벤트: findCol(['이벤트']),
       광고네트워크: findCol(['네트워크']),
       광고직판: findCol(['직판']),
-      합계: totalColIndex,
+      수익컬럼들: revenueColIndexes,
     };
 
-    console.log(`📊 컬럼 매핑: 날짜=${COL.날짜}, 특가=${COL.특가상품}, 광고네트워크=${COL.광고네트워크}, 합계=${COL.합계}`);
+    console.log(`📊 컬럼 매핑: 날짜=${COL.날짜}, 특가=${COL.특가상품}, 광고네트워크=${COL.광고네트워크}`);
 
     // ✅ 디버깅: 헤더 전체 출력
     console.log(`📊 전체 헤더(2행): ${headers.join(' | ')}`);
     
     // ✅ 디버깅: 처음 5개 데이터 행 원본 출력
-    console.log(`📊 === 원본 데이터 샘플 (3~7행) ===`);
-    for (let i = 2; i < Math.min(8, rows.length); i++) {
+    console.log(`📊 === 원본 데이터 샘플 (4~8행) ===`);
+    for (let i = 3; i < Math.min(8, rows.length); i++) {
       const row = rows[i];
-      console.log(`  행${i+1}: A="${row[0]}" | 특가(${COL.특가상품})="${row[COL.특가상품]}" | 광고네트워크(${COL.광고네트워크})="${row[COL.광고네트워크]}" | 합계(${COL.합계})="${row[COL.합계]}"`);
+      // 모든 수익 컬럼 합산
+      let rowTotal = 0;
+      for (const colIdx of COL.수익컬럼들) {
+        rowTotal += parseNumber(row[colIdx]);
+      }
+      console.log(`  행${i+1}: A="${row[0]}" | 특가(${COL.특가상품})="${row[COL.특가상품]}" | 광고네트워크(${COL.광고네트워크})="${row[COL.광고네트워크]}" | 전체합산=${formatWon(rowTotal)}`);
     }
     console.log(`📊 === 원본 데이터 샘플 끝 ===`);
 
@@ -162,39 +170,22 @@ async function getRevenueData(days = 7) {
         continue;
       }
       
-      // 합계 파싱
-      const totalStr = row[COL.합계];
-      if (!totalStr || totalStr === '-' || totalStr === '₩') continue;
+      // ✅ 수정: 모든 수익 컬럼 합산으로 total 계산
+      let total = 0;
+      for (const colIdx of COL.수익컬럼들) {
+        const val = parseNumber(row[colIdx]);
+        total += val;
+      }
       
-      // ✅ 수정 4: breakdown 먼저 파싱
+      if (total === 0) continue;
+
+      // breakdown은 주요 항목만 따로 저장
       const breakdown = {
         특가상품: COL.특가상품 >= 0 ? parseNumber(row[COL.특가상품]) : 0,
         이벤트: COL.이벤트 >= 0 ? parseNumber(row[COL.이벤트]) : 0,
         광고네트워크: COL.광고네트워크 >= 0 ? parseNumber(row[COL.광고네트워크]) : 0,
         광고직판: COL.광고직판 >= 0 ? parseNumber(row[COL.광고직판]) : 0,
       };
-      
-      // 합계 컬럼 값 파싱
-      const totalFromSheet = parseNumber(totalStr);
-      
-      // ✅ 수정 5: 합계 값이 비정상적으로 작으면 (10만원 미만) breakdown 합산 사용
-      // 시트의 합계 컬럼이 10만원 단위로 저장된 경우를 처리
-      const breakdownSum = Object.values(breakdown).reduce((sum, val) => sum + val, 0);
-      
-      let total;
-      if (totalFromSheet < 100000 && breakdownSum > 100000) {
-        // 합계 컬럼이 10만원 단위로 저장된 경우 → breakdown 합산 사용
-        total = breakdownSum;
-        console.log(`  ⚠️ 합계 컬럼 값(${totalFromSheet})이 작아서 breakdown 합산 사용`);
-      } else if (totalFromSheet < 100000 && breakdownSum < 100000) {
-        // 둘 다 작으면 합계 컬럼에 100,000 곱하기
-        total = totalFromSheet * 100000;
-        console.log(`  ⚠️ 합계 컬럼 값(${totalFromSheet})에 100,000 곱함`);
-      } else {
-        total = totalFromSheet;
-      }
-      
-      if (total === 0) continue;
 
       const dayData = {
         date: dateStr,
@@ -203,8 +194,7 @@ async function getRevenueData(days = 7) {
       };
       
       revenueData.push(dayData);
-      // ✅ 수정 6: 로그에 상세 정보 출력
-      console.log(`  📅 ${dateStr}: ${formatWon(total)} (시트원본: ${totalFromSheet}, breakdown합: ${breakdownSum})`);
+      console.log(`  📅 ${dateStr}: ${formatWon(total)}`);
     }
 
     console.log(`📊 파싱된 매출 데이터: ${revenueData.length}일`);
