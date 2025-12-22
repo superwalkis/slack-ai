@@ -10,8 +10,6 @@ const anthropic = new Anthropic({
 });
 
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
-
-// CEO의 DM 접근용 User Token (Bot Token과 별도)
 const slackUser = new WebClient(process.env.SLACK_USER_TOKEN);
 
 const notion = new Client({
@@ -19,7 +17,7 @@ const notion = new Client({
 });
 
 // ============================================
-// Slack 메시지 수집
+// Slack 채널 메시지 수집
 // ============================================
 async function getSlackMessages(days = 1) {
   try {
@@ -82,7 +80,6 @@ async function getCEODirectMessages(userMap, days = 1) {
     const now = Math.floor(Date.now() / 1000);
     const oldest = now - (86400 * days);
 
-    // CEO의 모든 DM 채널 가져오기
     const dmsResult = await slackUser.conversations.list({
       types: 'im',
       limit: 100,
@@ -100,7 +97,6 @@ async function getCEODirectMessages(userMap, days = 1) {
         });
 
         if (history.messages && history.messages.length > 0) {
-          // 상대방 이름 가져오기
           const otherUserId = dm.user;
           const otherUserName = userMap[otherUserId] || '알 수 없음';
 
@@ -120,11 +116,9 @@ async function getCEODirectMessages(userMap, days = 1) {
       }
     }
 
-    console.log(`✅ CEO DM: ${allDMs.length}개 메시지`);
     return allDMs;
   } catch (error) {
     console.error('CEO DM 가져오기 실패:', error);
-    console.log('💡 SLACK_USER_TOKEN이 설정되어 있는지 확인하세요.');
     return [];
   }
 }
@@ -132,11 +126,9 @@ async function getCEODirectMessages(userMap, days = 1) {
 // ============================================
 // Notion 데이터 수집
 // ============================================
-
-// 최근 수정된 페이지 가져오기
-async function getRecentNotionPages() {
+async function getRecentNotionPages(days = 1) {
   try {
-    const yesterday = new Date(Date.now() - 86400000).toISOString();
+    const since = new Date(Date.now() - (86400000 * days)).toISOString();
     
     const response = await notion.search({
       filter: {
@@ -150,14 +142,14 @@ async function getRecentNotionPages() {
       page_size: 50,
     });
 
-    // 최근 24시간 내 수정된 페이지만 필터링
+    // 기간 내 수정된 페이지만 필터링
     const recentPages = response.results.filter(page => {
-      return page.last_edited_time >= yesterday;
+      return page.last_edited_time >= since;
     });
 
     const pagesWithContent = [];
 
-    for (const page of recentPages.slice(0, 20)) { // 최대 20개
+    for (const page of recentPages.slice(0, 20)) {
       try {
         const pageInfo = await getPageInfo(page);
         if (pageInfo) {
@@ -175,7 +167,6 @@ async function getRecentNotionPages() {
   }
 }
 
-// 페이지 상세 정보 추출
 async function getPageInfo(page) {
   try {
     // 페이지 제목 추출
@@ -200,25 +191,20 @@ async function getPageInfo(page) {
     // 댓글 가져오기
     const comments = await getPageComments(page.id);
 
-    // 수정자 정보
-    const lastEditedBy = page.last_edited_by?.id || '알 수 없음';
-
     return {
       id: page.id,
       title,
-      content: content.slice(0, 2000), // 최대 2000자
+      content: content.slice(0, 2000),
       comments,
       lastEditedTime: page.last_edited_time,
-      lastEditedBy,
+      lastEditedBy: page.last_edited_by?.id || '알 수 없음',
       url: page.url,
     };
   } catch (error) {
-    console.error(`페이지 정보 추출 실패:`, error);
     return null;
   }
 }
 
-// 블록에서 텍스트 추출
 function extractTextFromBlocks(blocks) {
   let text = '';
 
@@ -233,22 +219,15 @@ function extractTextFromBlocks(blocks) {
       text += blockText + '\n';
     }
 
-    // 할 일 목록 처리
     if (blockType === 'to_do' && blockContent) {
       const checked = blockContent.checked ? '✅' : '⬜';
       text += `${checked} `;
-    }
-
-    // 제목 처리
-    if (blockType.startsWith('heading')) {
-      text += '\n';
     }
   }
 
   return text.trim();
 }
 
-// 페이지 댓글 가져오기
 async function getPageComments(pageId) {
   try {
     const response = await notion.comments.list({
@@ -261,15 +240,13 @@ async function getPageComments(pageId) {
       createdTime: comment.created_time,
     }));
   } catch (error) {
-    // 댓글 권한이 없을 수 있음
     return [];
   }
 }
 
-// 특정 데이터베이스 쿼리 (프로젝트/태스크 추적용)
-async function getNotionDatabases() {
+async function getNotionDatabases(days = 1) {
   try {
-    const yesterday = new Date(Date.now() - 86400000).toISOString();
+    const since = new Date(Date.now() - (86400000 * days)).toISOString();
 
     const response = await notion.search({
       filter: {
@@ -280,21 +257,19 @@ async function getNotionDatabases() {
 
     const databaseSummaries = [];
 
-    for (const db of response.results.slice(0, 5)) { // 최대 5개 DB
+    for (const db of response.results.slice(0, 5)) {
       try {
-        // 데이터베이스 제목 추출
         let dbTitle = '제목 없음';
         if (db.title && db.title[0]) {
           dbTitle = db.title[0].plain_text;
         }
 
-        // 최근 수정된 항목 쿼리
         const items = await notion.databases.query({
           database_id: db.id,
           filter: {
             timestamp: 'last_edited_time',
             last_edited_time: {
-              after: yesterday,
+              after: since,
             },
           },
           page_size: 20,
@@ -302,13 +277,11 @@ async function getNotionDatabases() {
 
         if (items.results.length > 0) {
           const itemSummaries = items.results.map(item => {
-            // 첫 번째 title 속성 찾기
             const titleProp = Object.values(item.properties).find(
               p => p.type === 'title'
             );
             const title = titleProp?.title?.[0]?.plain_text || '제목 없음';
 
-            // status 속성 찾기
             const statusProp = Object.values(item.properties).find(
               p => p.type === 'status' || p.type === 'select'
             );
@@ -336,7 +309,6 @@ async function getNotionDatabases() {
   }
 }
 
-// Notion 사용자 이름 매핑
 async function getNotionUsers() {
   try {
     const response = await notion.users.list();
@@ -382,7 +354,7 @@ async function analyzeWithClaude(slackMessages, ceoDMs, notionData, days = 1) {
     notionPagesSection = pages
       .map(p => {
         const editor = users[p.lastEditedBy] || '알 수 없음';
-        let section = `📄 ${p.title} (수정: ${editor})\n내용 요약: ${p.content.slice(0, 500)}`;
+        let section = `📄 ${p.title} (수정: ${editor})\n내용: ${p.content.slice(0, 500)}`;
         if (p.comments.length > 0) {
           section += `\n댓글: ${p.comments.map(c => 
             `${users[c.author] || '익명'}: ${c.text}`
@@ -420,6 +392,11 @@ async function analyzeWithClaude(slackMessages, ceoDMs, notionData, days = 1) {
    - 해결된 이슈 vs 아직 열린 이슈
    - 에스컬레이션 필요한 사항
 
+📝 Notion 활동 분석
+   - 활발히 업데이트된 문서/프로젝트
+   - 문서화가 부족한 영역
+   - Slack 대화 vs Notion 문서 갭
+
 📊 조직 건강도 진단
    - 소통 병목 구간
    - 의사결정 지연 패턴
@@ -433,7 +410,7 @@ async function analyzeWithClaude(slackMessages, ceoDMs, notionData, days = 1) {
 🎯 앞으로의 모니터링 포인트
    - 특히 주시해야 할 팀원/프로젝트
    - 예상되는 리스크` : `
-다음 형식으로 통합 분석해주세요:
+다음 형식으로 분석해주세요:
 
 📌 긴급 이슈 (우선순위 Top 3)
 🔴 [출처: 채널/DM/Notion] [팀명] 이슈 제목
@@ -449,6 +426,11 @@ async function analyzeWithClaude(slackMessages, ceoDMs, notionData, days = 1) {
    - 약속/결정 사항
    - 후속 조치 필요한 것
 
+📝 Notion 주요 변경
+   - 중요 문서 업데이트
+   - 프로젝트 상태 변경
+   - 주목할 댓글/피드백
+
 🟢 칭찬할 점 / 좋은 진행상황
    - 팀원 이름
    - 기여 내용
@@ -456,13 +438,11 @@ async function analyzeWithClaude(slackMessages, ceoDMs, notionData, days = 1) {
 
 ⚠️ 패턴 감지
    - 반복되는 문제
-   - 소통 단절 징후
+   - 소통 단절 징후 (Slack ↔ Notion 불일치)
    - DM에서만 나온 이슈 (채널 공유 필요?)
-   - 방향성 혼란
 
 📊 생산성 인사이트
    - 가장 활발한 팀원/채널
-   - 정체된 프로젝트
    - 1:1 미팅 필요해 보이는 팀원`;
 
   const prompt = `당신은 CEO의 Staff로서 조직을 모니터링합니다.
@@ -478,20 +458,21 @@ ${slackSection}
 ${dmSection}
 
 ═══════════════════════════════════
-📝 Notion 업데이트
+📝 Notion 페이지 업데이트
 ═══════════════════════════════════
-[최근 수정된 페이지]
 ${notionPagesSection}
 
-[데이터베이스 변경사항]
+═══════════════════════════════════
+📊 Notion 데이터베이스 변경
+═══════════════════════════════════
 ${notionDbSection}
 
 ═══════════════════════════════════
 ${analysisFormat}
 
 분석 시 주의사항:
+- Slack, DM, Notion 데이터 교차 분석
 - DM 내용은 민감할 수 있으니 팩트 중심으로
-- 채널 대화와 DM 교차 분석 (공개 vs 비공개 논의 갭)
 - 비즈니스 임팩트가 큰 것 우선
 - 구체적 액션 아이템
 - SuperWalk/DeFi/베이직 모드 관련 특히 주의`;
@@ -525,7 +506,7 @@ async function sendDMToCEO(analysis, stats) {
       ? `🚀 ${stats.days}일간 종합 분석 리포트`
       : '📊 어제의 조직 모니터링 리포트';
     
-    const statsText = `📈 수집 통계 (${stats.days}일): Slack 채널 ${stats.slackCount}개 | CEO DM ${stats.dmCount}개 | Notion 페이지 ${stats.notionPages}개 | DB 변경 ${stats.notionDbs}개`;
+    const statsText = `📈 수집 (${stats.days}일): Slack ${stats.slackCount}개 | DM ${stats.dmCount}개 | Notion 페이지 ${stats.notionPages}개 | DB ${stats.notionDbs}개`;
 
     await slack.chat.postMessage({
       channel: process.env.CEO_SLACK_ID,
@@ -555,7 +536,7 @@ async function sendDMToCEO(analysis, stats) {
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: analysis.slice(0, 3000), // Slack 블록 제한
+            text: analysis.slice(0, 3000),
           },
         },
         {
@@ -566,14 +547,13 @@ async function sendDMToCEO(analysis, stats) {
           elements: [
             {
               type: 'mrkdwn',
-              text: `🕐 생성: ${new Date().toLocaleString('ko-KR')} | 🤖 AI: Claude Sonnet 4`,
+              text: `🕐 ${new Date().toLocaleString('ko-KR')} | 🤖 Claude Sonnet 4`,
             },
           ],
         },
       ],
     });
 
-    // 분석이 길 경우 추가 메시지
     if (analysis.length > 3000) {
       await slack.chat.postMessage({
         channel: process.env.CEO_SLACK_ID,
@@ -591,42 +571,41 @@ async function sendDMToCEO(analysis, stats) {
 // 메인 핸들러
 // ============================================
 module.exports = async (req, res) => {
-  // 쿼리 파라미터로 분석 기간 설정 (기본: 1일, 최대: 30일)
   const days = Math.min(parseInt(req.query?.days) || 1, 30);
   const isInitialRun = days > 1;
 
   console.log('='.repeat(50));
-  console.log(`${isInitialRun ? '🚀 초기 분석' : '📅 정기 분석'} 시작: ${new Date().toISOString()}`);
+  console.log(`${isInitialRun ? '🚀 초기 분석' : '📅 정기 분석'} 시작`);
   console.log(`📆 분석 기간: ${days}일`);
   console.log('='.repeat(50));
 
   try {
-    // 1. Slack 메시지 수집
+    // 1. Slack 채널 메시지 수집
     console.log('\n📱 Slack 채널 메시지 수집 중...');
     const { messages: slackMessages, userMap } = await getSlackMessages(days);
-    console.log(`✅ Slack 채널 메시지: ${slackMessages.length}개`);
+    console.log(`✅ Slack 채널: ${slackMessages.length}개`);
 
     // 2. CEO DM 수집
     console.log('\n💬 CEO DM 수집 중...');
     const ceoDMs = await getCEODirectMessages(userMap, days);
-    console.log(`✅ CEO DM 메시지: ${ceoDMs.length}개`);
+    console.log(`✅ CEO DM: ${ceoDMs.length}개`);
 
-    // 3. Notion 사용자 목록 가져오기
-    console.log('\n👥 Notion 사용자 목록 가져오는 중...');
+    // 3. Notion 사용자
+    console.log('\n👥 Notion 사용자 목록...');
     const notionUsers = await getNotionUsers();
     console.log(`✅ Notion 사용자: ${Object.keys(notionUsers).length}명`);
 
-    // 3. Notion 페이지 수집
+    // 4. Notion 페이지
     console.log('\n📝 Notion 페이지 수집 중...');
-    const notionPages = await getRecentNotionPages();
-    console.log(`✅ 업데이트된 페이지: ${notionPages.length}개`);
+    const notionPages = await getRecentNotionPages(days);
+    console.log(`✅ Notion 페이지: ${notionPages.length}개`);
 
-    // 4. Notion 데이터베이스 수집
+    // 5. Notion 데이터베이스
     console.log('\n📊 Notion 데이터베이스 수집 중...');
-    const notionDatabases = await getNotionDatabases();
-    console.log(`✅ 활성 데이터베이스: ${notionDatabases.length}개`);
+    const notionDatabases = await getNotionDatabases(days);
+    console.log(`✅ Notion DB: ${notionDatabases.length}개`);
 
-    // 5. Claude 분석
+    // 6. Claude 분석
     console.log('\n🤖 Claude 분석 중...');
     const analysis = await analyzeWithClaude(slackMessages, ceoDMs, {
       pages: notionPages,
@@ -635,7 +614,7 @@ module.exports = async (req, res) => {
     }, days);
     console.log('✅ 분석 완료');
 
-    // 6. CEO에게 발송
+    // 7. CEO에게 발송
     console.log('\n📤 CEO에게 DM 발송 중...');
     await sendDMToCEO(analysis, {
       slackCount: slackMessages.length,
@@ -645,13 +624,11 @@ module.exports = async (req, res) => {
       days: days,
     });
 
-    console.log('\n' + '='.repeat(50));
-    console.log('✅ 크론 작업 완료');
-    console.log('='.repeat(50));
+    console.log('\n✅ 완료!');
 
     res.status(200).json({
       success: true,
-      type: days > 1 ? 'initial_analysis' : 'daily_analysis',
+      type: isInitialRun ? 'initial_analysis' : 'daily_analysis',
       days: days,
       stats: {
         slackMessages: slackMessages.length,
@@ -662,7 +639,7 @@ module.exports = async (req, res) => {
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    console.error('❌ 크론 작업 실패:', error);
+    console.error('❌ 실패:', error);
     res.status(500).json({
       success: false,
       error: error.message,
