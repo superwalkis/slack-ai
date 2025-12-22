@@ -155,24 +155,45 @@ async function getRevenueData(days = 7) {
       const totalStr = row[COL.합계];
       if (!totalStr || totalStr === '-' || totalStr === '₩') continue;
       
-      // ✅ 수정 4: 원화 값 그대로 유지 (100,000으로 나누지 않음)
-      const total = parseNumber(totalStr);
+      // ✅ 수정 4: breakdown 먼저 파싱
+      const breakdown = {
+        특가상품: COL.특가상품 >= 0 ? parseNumber(row[COL.특가상품]) : 0,
+        이벤트: COL.이벤트 >= 0 ? parseNumber(row[COL.이벤트]) : 0,
+        광고네트워크: COL.광고네트워크 >= 0 ? parseNumber(row[COL.광고네트워크]) : 0,
+        광고직판: COL.광고직판 >= 0 ? parseNumber(row[COL.광고직판]) : 0,
+      };
+      
+      // 합계 컬럼 값 파싱
+      const totalFromSheet = parseNumber(totalStr);
+      
+      // ✅ 수정 5: 합계 값이 비정상적으로 작으면 (10만원 미만) breakdown 합산 사용
+      // 시트의 합계 컬럼이 10만원 단위로 저장된 경우를 처리
+      const breakdownSum = Object.values(breakdown).reduce((sum, val) => sum + val, 0);
+      
+      let total;
+      if (totalFromSheet < 100000 && breakdownSum > 100000) {
+        // 합계 컬럼이 10만원 단위로 저장된 경우 → breakdown 합산 사용
+        total = breakdownSum;
+        console.log(`  ⚠️ 합계 컬럼 값(${totalFromSheet})이 작아서 breakdown 합산 사용`);
+      } else if (totalFromSheet < 100000 && breakdownSum < 100000) {
+        // 둘 다 작으면 합계 컬럼에 100,000 곱하기
+        total = totalFromSheet * 100000;
+        console.log(`  ⚠️ 합계 컬럼 값(${totalFromSheet})에 100,000 곱함`);
+      } else {
+        total = totalFromSheet;
+      }
+      
       if (total === 0) continue;
 
       const dayData = {
         date: dateStr,
-        total: total,  // ✅ 원 단위 그대로 저장
-        breakdown: {
-          특가상품: COL.특가상품 >= 0 ? parseNumber(row[COL.특가상품]) : 0,
-          이벤트: COL.이벤트 >= 0 ? parseNumber(row[COL.이벤트]) : 0,
-          광고네트워크: COL.광고네트워크 >= 0 ? parseNumber(row[COL.광고네트워크]) : 0,
-          광고직판: COL.광고직판 >= 0 ? parseNumber(row[COL.광고직판]) : 0,
-        }
+        total: total,
+        breakdown: breakdown,
       };
       
       revenueData.push(dayData);
-      // ✅ 수정 5: 로그에 실제 원화 값 출력
-      console.log(`  📅 ${dateStr}: ${formatWon(total)} (원본: ${total.toLocaleString()}원)`);
+      // ✅ 수정 6: 로그에 상세 정보 출력
+      console.log(`  📅 ${dateStr}: ${formatWon(total)} (시트원본: ${totalFromSheet}, breakdown합: ${breakdownSum})`);
     }
 
     console.log(`📊 파싱된 매출 데이터: ${revenueData.length}일`);
