@@ -137,6 +137,17 @@ async function getRevenueData(days = 7) {
 
     console.log(`📊 컬럼 매핑: 날짜=${COL.날짜}, 특가=${COL.특가상품}, 광고네트워크=${COL.광고네트워크}, 합계=${COL.합계}`);
 
+    // ✅ 디버깅: 헤더 전체 출력
+    console.log(`📊 전체 헤더(2행): ${headers.join(' | ')}`);
+    
+    // ✅ 디버깅: 처음 5개 데이터 행 원본 출력
+    console.log(`📊 === 원본 데이터 샘플 (3~7행) ===`);
+    for (let i = 2; i < Math.min(8, rows.length); i++) {
+      const row = rows[i];
+      console.log(`  행${i+1}: A="${row[0]}" | 특가(${COL.특가상품})="${row[COL.특가상품]}" | 광고네트워크(${COL.광고네트워크})="${row[COL.광고네트워크]}" | 합계(${COL.합계})="${row[COL.합계]}"`);
+    }
+    console.log(`📊 === 원본 데이터 샘플 끝 ===`);
+
     // ✅ 수정 3: 데이터 행 파싱 - 날짜 정규식으로 필터링
     const revenueData = [];
     
