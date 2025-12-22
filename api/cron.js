@@ -18,6 +18,45 @@ const notion = new Client({
 });
 
 // ============================================
+// ✅ 수정 1: 날짜 유효성 검사 함수 추가
+// ============================================
+function isValidDateRow(dateStr) {
+  if (!dateStr) return false;
+  const value = String(dateStr).trim();
+  // "현재까지", 빈 값, 누적 등 제외
+  if (value === '' || value.includes('현재까지') || value.includes('누적')) return false;
+  // YYYY-MM-DD 형식만 허용
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+// ============================================
+// ✅ 수정 2: formatWon 함수 개선 (억/만원 단위 명확화)
+// ============================================
+function formatWon(amount) {
+  if (!amount || amount === 0) return '₩0';
+
+  // 1억 이상이면 "xx.x억"
+  if (amount >= 100_000_000) {
+    const v = (amount / 100_000_000).toFixed(1);
+    return `₩${v}억`;
+  }
+
+  // 100만 이상이면 "xxx.x만" 
+  if (amount >= 1_000_000) {
+    const v = (amount / 10_000).toFixed(1);
+    return `₩${v}만`;
+  }
+
+  // 1만 이상이면 "xx.x만"
+  if (amount >= 10_000) {
+    const v = (amount / 10_000).toFixed(1);
+    return `₩${v}만`;
+  }
+
+  return '₩' + amount.toLocaleString('ko-KR');
+}
+
+// ============================================
 // Google Sheets 매출 데이터 수집
 // ============================================
 async function getRevenueData(days = 7) {
@@ -64,18 +103,13 @@ async function getRevenueData(days = 7) {
     // 실제 구조:
     // 1행: 대분류 헤더
     // 2행: 세부 헤더 (날짜/소분류, 결제 요요, 팁포크...)
-    // 3행: 누적 합계
+    // 3행: 누적 합계 ← 이 행은 제외해야 함!
     // 4행~: 일별 데이터
-    
-    // A=0(날짜), B~W=각종 항목들, X=광고수익 합계 근처, AB=최종 합계
-    // 스프레드시트 보면:
-    // A=날짜, O=특가상품, S=광고네트워크, T=직판, AB=합계
     
     // 헤더에서 합계 컬럼 찾기
     const headers = rows[1];
     let totalColIndex = headers.findIndex(h => h && h.includes('합계'));
     if (totalColIndex === -1) {
-      // 마지막에서 찾기 (보통 맨 오른쪽)
       for (let i = headers.length - 1; i >= 0; i--) {
         if (headers[i] && headers[i].includes('합계')) {
           totalColIndex = i;
@@ -83,7 +117,6 @@ async function getRevenueData(days = 7) {
         }
       }
     }
-    // 그래도 못 찾으면 마지막 숫자 컬럼
     if (totalColIndex === -1) totalColIndex = 27; // AB열
     
     console.log(`📊 합계 컬럼 인덱스: ${totalColIndex}`);
@@ -104,27 +137,31 @@ async function getRevenueData(days = 7) {
 
     console.log(`📊 컬럼 매핑: 날짜=${COL.날짜}, 특가=${COL.특가상품}, 광고네트워크=${COL.광고네트워크}, 합계=${COL.합계}`);
 
-    // 데이터 행 파싱 (4행부터 = 인덱스 3)
+    // ✅ 수정 3: 데이터 행 파싱 - 날짜 정규식으로 필터링
     const revenueData = [];
     
     for (let i = 3; i < rows.length; i++) {
       const row = rows[i];
       if (!row || row.length < 5) continue;
       
-      // 날짜 파싱 (A열)
+      // ✅ 날짜 유효성 검사 (현재까지, 누적 행 제외)
       const dateStr = row[COL.날짜];
-      if (!dateStr || !dateStr.includes('2025')) continue;
+      if (!isValidDateRow(dateStr)) {
+        console.log(`  ⏭️ 건너뜀 (유효하지 않은 날짜): "${dateStr}"`);
+        continue;
+      }
       
       // 합계 파싱
       const totalStr = row[COL.합계];
       if (!totalStr || totalStr === '-' || totalStr === '₩') continue;
       
+      // ✅ 수정 4: 원화 값 그대로 유지 (100,000으로 나누지 않음)
       const total = parseNumber(totalStr);
       if (total === 0) continue;
 
       const dayData = {
         date: dateStr,
-        total: total,
+        total: total,  // ✅ 원 단위 그대로 저장
         breakdown: {
           특가상품: COL.특가상품 >= 0 ? parseNumber(row[COL.특가상품]) : 0,
           이벤트: COL.이벤트 >= 0 ? parseNumber(row[COL.이벤트]) : 0,
@@ -134,7 +171,8 @@ async function getRevenueData(days = 7) {
       };
       
       revenueData.push(dayData);
-      console.log(`  📅 ${dateStr}: ₩${total.toLocaleString()}`);
+      // ✅ 수정 5: 로그에 실제 원화 값 출력
+      console.log(`  📅 ${dateStr}: ${formatWon(total)} (원본: ${total.toLocaleString()}원)`);
     }
 
     console.log(`📊 파싱된 매출 데이터: ${revenueData.length}일`);
@@ -213,13 +251,9 @@ function calculateRevenueStats(data) {
   };
 }
 
+// ✅ 기존 formatRevenue 함수를 formatWon으로 대체
 function formatRevenue(num) {
-  if (num >= 100000000) {
-    return `${(num / 100000000).toFixed(1)}억`;
-  } else if (num >= 10000) {
-    return `${(num / 10000).toFixed(0)}만`;
-  }
-  return num.toLocaleString();
+  return formatWon(num);
 }
 
 // ============================================
@@ -449,99 +483,94 @@ async function getPageInfo(page) {
       }
     }
 
-    // 페이지 콘텐츠 가져오기
+    // 페이지 내용 가져오기
     const blocks = await notion.blocks.children.list({
       block_id: page.id,
-      page_size: 50,
+      page_size: 20,
     });
 
-    const content = extractTextFromBlocks(blocks.results);
+    let content = '';
+    for (const block of blocks.results) {
+      const text = extractTextFromBlock(block);
+      if (text) {
+        content += text + '\n';
+      }
+    }
 
     // 댓글 가져오기
-    const comments = await getPageComments(page.id);
+    let comments = [];
+    try {
+      const commentsResponse = await notion.comments.list({
+        block_id: page.id,
+      });
+      comments = commentsResponse.results.map(comment => ({
+        author: comment.created_by?.id || 'unknown',
+        text: comment.rich_text?.map(t => t.plain_text).join('') || '',
+        createdAt: comment.created_time,
+      }));
+    } catch (err) {
+      // 댓글 접근 실패는 조용히 넘어감
+    }
 
     return {
       id: page.id,
       title,
-      content: content.slice(0, 2000),
-      comments,
+      content: content.slice(0, 1000),
       lastEditedTime: page.last_edited_time,
-      lastEditedBy: page.last_edited_by?.id || '알 수 없음',
-      url: page.url,
+      lastEditedBy: page.last_edited_by?.id || 'unknown',
+      comments,
     };
   } catch (error) {
+    console.error('페이지 정보 가져오기 실패:', error);
     return null;
   }
 }
 
-function extractTextFromBlocks(blocks) {
-  let text = '';
-
-  for (const block of blocks) {
-    const blockType = block.type;
-    const blockContent = block[blockType];
-
-    if (blockContent?.rich_text) {
-      const blockText = blockContent.rich_text
-        .map(t => t.plain_text)
-        .join('');
-      text += blockText + '\n';
-    }
-
-    if (blockType === 'to_do' && blockContent) {
-      const checked = blockContent.checked ? '✅' : '⬜';
-      text += `${checked} `;
-    }
+function extractTextFromBlock(block) {
+  const type = block.type;
+  const content = block[type];
+  
+  if (!content) return '';
+  
+  if (content.rich_text) {
+    return content.rich_text.map(t => t.plain_text).join('');
   }
-
-  return text.trim();
-}
-
-async function getPageComments(pageId) {
-  try {
-    const response = await notion.comments.list({
-      block_id: pageId,
-    });
-
-    return response.results.map(comment => ({
-      author: comment.created_by?.id || '알 수 없음',
-      text: comment.rich_text?.map(t => t.plain_text).join('') || '',
-      createdTime: comment.created_time,
-    }));
-  } catch (error) {
-    return [];
-  }
+  
+  return '';
 }
 
 async function getNotionDatabases(days = 1) {
   try {
     const since = new Date(Date.now() - (86400000 * days)).toISOString();
-
+    
     const response = await notion.search({
       filter: {
         property: 'object',
         value: 'database',
       },
+      page_size: 20,
     });
 
     const databaseSummaries = [];
 
-    for (const db of response.results.slice(0, 5)) {
+    for (const db of response.results) {
       try {
+        // 데이터베이스 제목
         let dbTitle = '제목 없음';
         if (db.title && db.title[0]) {
           dbTitle = db.title[0].plain_text;
         }
 
+        // 최근 수정된 항목 가져오기
         const items = await notion.databases.query({
           database_id: db.id,
           filter: {
             timestamp: 'last_edited_time',
             last_edited_time: {
-              after: since,
+              on_or_after: since,
             },
           },
-          page_size: 20,
+          page_size: 10,
         });
 
         if (items.results.length > 0) {
@@ -656,26 +685,32 @@ async function analyzeWithClaude(slackMessages, ceoDMs, notionData, revenueData,
       .join('\n\n');
   }
 
-  // ✅ 매출 데이터 포맷팅
+  // ✅ 수정 6: 매출 데이터 포맷팅 (formatWon 적용)
   let revenueSection = '매출 데이터 없음 (시트 미연동 또는 데이터 없음)';
   if (revenueData && revenueData.data && revenueData.data.length > 0) {
     const stats = revenueData.stats;
     const recentDays = revenueData.data.slice(0, 7);
     
+    // ✅ 전일대비 변화 계산
+    const latestTotal = stats.latestTotal;
+    const previousTotal = stats.previousTotal;
+    const diff = latestTotal - previousTotal;
+    const diffSign = diff >= 0 ? '+' : '';
+    
     revenueSection = `📊 매출 현황 (${revenueData.sheetName} 시트, 최종 업데이트: ${revenueData.lastUpdated})
 
 💰 최근 매출:
-${recentDays.map(d => `  ${d.date}: ₩${formatRevenue(d.total)}`).join('\n')}
+${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}
 
 📈 통계:
-  - 최근 일 매출: ₩${formatRevenue(stats.latestTotal)}
+  - 최근 일 매출: ${formatWon(stats.latestTotal)} (${diffSign}${formatWon(Math.abs(diff))})
   - 전일 대비: ${stats.dayOverDayChange > 0 ? '+' : ''}${stats.dayOverDayChange}%
-  - ${stats.daysCount}일 평균: ₩${formatRevenue(stats.avg7Day)}
+  - ${stats.daysCount}일 평균: ${formatWon(stats.avg7Day)}
   - 평균 대비: ${stats.avgChange > 0 ? '+' : ''}${stats.avgChange}%
-  - 기간 총 매출: ₩${formatRevenue(stats.totalPeriod)}
+  - 기간 총 매출: ${formatWon(stats.totalPeriod)}
 
 🏆 Top 수익원:
-${stats.topCategories.map(([cat, val]) => `  - ${cat}: ₩${formatRevenue(val)}`).join('\n')}`;
+${stats.topCategories.map(([cat, val]) => `  - ${cat}: ${formatWon(val)}`).join('\n')}`;
   }
 
   // 초기 분석용 vs 일일 분석용 프롬프트
