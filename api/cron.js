@@ -42,8 +42,10 @@ async function getRevenueData(days = 7) {
     const now = new Date();
     const sheetName = `${String(now.getFullYear()).slice(2)}.${String(now.getMonth() + 1).padStart(2, '0')}`;
     
-    // 전체 데이터 범위 가져오기 (A~AA, 충분히 넓게)
-    const range = `${sheetName}!A:AA`;
+    console.log(`📊 시트 이름: ${sheetName}`);
+    
+    // A열부터 AB열까지 전체 가져오기
+    const range = `${sheetName}!A:AB`;
     
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId,
@@ -51,47 +53,70 @@ async function getRevenueData(days = 7) {
     });
 
     const rows = response.data.values;
-    if (!rows || rows.length < 3) {
-      console.log('매출 데이터 없음');
+    if (!rows || rows.length < 4) {
+      console.log('매출 데이터 없음 - 행 수:', rows?.length || 0);
       return null;
     }
 
-    // 헤더 행 (2번째 행, 인덱스 1)
+    console.log(`📊 가져온 행 수: ${rows.length}`);
+    console.log(`📊 2행(헤더): ${rows[1]?.slice(0, 5).join(', ')}...`);
+
+    // 실제 구조:
+    // 1행: 대분류 헤더
+    // 2행: 세부 헤더 (날짜/소분류, 결제 요요, 팁포크...)
+    // 3행: 누적 합계
+    // 4행~: 일별 데이터
+    
+    // A=0(날짜), B~W=각종 항목들, X=광고수익 합계 근처, AB=최종 합계
+    // 스프레드시트 보면:
+    // A=날짜, O=특가상품, S=광고네트워크, T=직판, AB=합계
+    
+    // 헤더에서 합계 컬럼 찾기
     const headers = rows[1];
+    let totalColIndex = headers.findIndex(h => h && h.includes('합계'));
+    if (totalColIndex === -1) {
+      // 마지막에서 찾기 (보통 맨 오른쪽)
+      for (let i = headers.length - 1; i >= 0; i--) {
+        if (headers[i] && headers[i].includes('합계')) {
+          totalColIndex = i;
+          break;
+        }
+      }
+    }
+    // 그래도 못 찾으면 마지막 숫자 컬럼
+    if (totalColIndex === -1) totalColIndex = 27; // AB열
     
-    // 날짜 컬럼 인덱스 찾기 (AA열 = 26번째, 0-indexed = 26)
-    const dateColIndex = headers.findIndex(h => h && h.includes('날짜')) !== -1 
-      ? headers.findIndex(h => h && h.includes('날짜'))
-      : 26; // AA열
-    
-    // 합계 컬럼 인덱스 찾기
-    const totalColIndex = headers.findIndex(h => h && h.includes('합계'));
-    
-    // 주요 컬럼 인덱스
-    const colIndexes = {
-      수수료: headers.findIndex(h => h && h.includes('수수료')),
-      이벤트상점: headers.findIndex(h => h && h.includes('이벤트')),
-      특가상품: headers.findIndex(h => h && h.includes('특가')),
-      자동수리패스: headers.findIndex(h => h && h.includes('자동수리')),
-      자동컴플패스: headers.findIndex(h => h && h.includes('자동컴플')),
-      광고네트워크: headers.findIndex(h => h && h.includes('네트워크')),
-      광고직판: headers.findIndex(h => h && h.includes('직판')),
-      이커머스: headers.findIndex(h => h && h.includes('E-커머스') || h && h.includes('커머스')),
+    console.log(`📊 합계 컬럼 인덱스: ${totalColIndex}`);
+
+    // 주요 컬럼 인덱스 찾기
+    const findCol = (keywords) => {
+      return headers.findIndex(h => h && keywords.some(k => h.includes(k)));
     };
 
-    // 데이터 행 파싱 (3번째 행부터)
+    const COL = {
+      날짜: 0, // A열
+      특가상품: findCol(['특가']),
+      이벤트: findCol(['이벤트']),
+      광고네트워크: findCol(['네트워크']),
+      광고직판: findCol(['직판']),
+      합계: totalColIndex,
+    };
+
+    console.log(`📊 컬럼 매핑: 날짜=${COL.날짜}, 특가=${COL.특가상품}, 광고네트워크=${COL.광고네트워크}, 합계=${COL.합계}`);
+
+    // 데이터 행 파싱 (4행부터 = 인덱스 3)
     const revenueData = [];
     
-    for (let i = 2; i < rows.length; i++) {
+    for (let i = 3; i < rows.length; i++) {
       const row = rows[i];
-      if (!row || row.length < 10) continue;
+      if (!row || row.length < 5) continue;
       
-      // 날짜 파싱
-      const dateStr = row[dateColIndex];
-      if (!dateStr || dateStr === '-') continue;
+      // 날짜 파싱 (A열)
+      const dateStr = row[COL.날짜];
+      if (!dateStr || !dateStr.includes('2025')) continue;
       
-      // 합계 파싱 (₩ 기호와 쉼표 제거)
-      const totalStr = row[totalColIndex];
+      // 합계 파싱
+      const totalStr = row[COL.합계];
       if (!totalStr || totalStr === '-' || totalStr === '₩') continue;
       
       const total = parseNumber(totalStr);
@@ -101,18 +126,22 @@ async function getRevenueData(days = 7) {
         date: dateStr,
         total: total,
         breakdown: {
-          수수료: parseNumber(row[colIndexes.수수료]),
-          이벤트상점: parseNumber(row[colIndexes.이벤트상점]),
-          특가상품: parseNumber(row[colIndexes.특가상품]),
-          자동수리패스: parseNumber(row[colIndexes.자동수리패스]),
-          자동컴플패스: parseNumber(row[colIndexes.자동컴플패스]),
-          광고네트워크: parseNumber(row[colIndexes.광고네트워크]),
-          광고직판: parseNumber(row[colIndexes.광고직판]),
-          이커머스: parseNumber(row[colIndexes.이커머스]),
+          특가상품: COL.특가상품 >= 0 ? parseNumber(row[COL.특가상품]) : 0,
+          이벤트: COL.이벤트 >= 0 ? parseNumber(row[COL.이벤트]) : 0,
+          광고네트워크: COL.광고네트워크 >= 0 ? parseNumber(row[COL.광고네트워크]) : 0,
+          광고직판: COL.광고직판 >= 0 ? parseNumber(row[COL.광고직판]) : 0,
         }
       };
       
       revenueData.push(dayData);
+      console.log(`  📅 ${dateStr}: ₩${total.toLocaleString()}`);
+    }
+
+    console.log(`📊 파싱된 매출 데이터: ${revenueData.length}일`);
+
+    if (revenueData.length === 0) {
+      console.log('⚠️ 파싱된 데이터 없음');
+      return null;
     }
 
     // 최신 날짜순 정렬
@@ -136,6 +165,7 @@ async function getRevenueData(days = 7) {
     };
   } catch (error) {
     console.error('Google Sheets 매출 데이터 가져오기 실패:', error.message);
+    console.error('상세 에러:', error);
     return null;
   }
 }
