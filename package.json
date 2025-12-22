@@ -6,9 +6,10 @@
   "scripts": {
     "dev": "node api/cron.js"
   },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.20.0",
-    "@slack/web-api": "^6.11.0",
-    "@notionhq/client": "^2.2.14"
+ "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@slack/web-api": "^7.8.0",
+    "@notionhq/client": "^2.2.15",
+    "googleapis": "^126.0.0"
   }
 }
