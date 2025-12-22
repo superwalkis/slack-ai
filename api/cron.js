@@ -130,13 +130,35 @@ async function getRevenueData(days = 7) {
     console.log(`📊 수익 컬럼 인덱스들: ${revenueColIndexes.join(', ')} (총 ${revenueColIndexes.length}개)`);
 
     const COL = {
-      날짜: 0, // A열
-      특가상품: findCol(['특가']),
-      이벤트: findCol(['이벤트']),
-      광고네트워크: findCol(['네트워크']),
-      광고직판: findCol(['직판']),
+      날짜: 0,
+      래플응모: findCol(['래플 응모', '래플응모']),
+      팀워크: findCol(['팀워크']),
+      스팀팩상자개봉: findCol(['스팀팩 상자 개봉', '스팀팩']),
+      신발소켓개방: findCol(['신발 소켓 개방', '신발 소켓']),
+      장비소켓개방: findCol(['장비 소켓 개방', '장비 소켓']),
+      첫구매패키지: findCol(['첫구매 패키지', '첫구매']),
+      슈퍼즈응원단슬롯개방: findCol(['슈퍼즈 응원단 슬롯', '응원단 슬롯']),
+      슈퍼즈캔디구매: findCol(['슈퍼즈 캔디', '캔디 구매']),
+      확률구매신발: findCol(['확률 구매(신발)', '확률구매(신발)']),
+      확률구매슈퍼즈: findCol(['확률 구매(슈퍼즈)', '확률구매(슈퍼즈)']),
+      거래수수료신발: findCol(['거래수수료(신발)']),
+      거래수수료슈퍼즈: findCol(['거래수수료(슈퍼즈)']),
+      이벤트상점: findCol(['이벤트 상점', '이벤트상점']),
+      특가상품: findCol(['특가 상품', '특가상품', '특가']),
+      자동수리패스: findCol(['자동수리패스', '자동수리']),
+      자동멈춤패스: findCol(['자동멈춤패스', '자동멈춤']),
+      옵션보관함A: findCol(['옵션보관함(A)']),
+      옵션보관함B: findCol(['옵션보관함(B)']),
+      옵션보관함C: findCol(['옵션보관함(C)']),
+      교환수수료: findCol(['교환 수수료', '교환수수료']),
+      네트워크: findCol(['네트워크']),
+      직판: findCol(['직판']),
+      공략집: findCol(['공략집']),
+      배경화면: findCol(['배경화면']),
       수익컬럼들: revenueColIndexes,
     };
+    
+    console.log(`📊 컬럼 매핑: 이벤트상점=${COL.이벤트상점}, 거래수수료신발=${COL.거래수수료신발}, 네트워크=${COL.네트워크}, 특가=${COL.특가상품}`);
 
     console.log(`📊 컬럼 매핑: 날짜=${COL.날짜}, 특가=${COL.특가상품}, 광고네트워크=${COL.광고네트워크}`);
 
@@ -179,12 +201,32 @@ async function getRevenueData(days = 7) {
       
       if (total === 0) continue;
 
-      // breakdown은 주요 항목만 따로 저장
+      // breakdown - 모든 수익 카테고리 저장
       const breakdown = {
+        래플응모: COL.래플응모 >= 0 ? parseNumber(row[COL.래플응모]) : 0,
+        팀워크: COL.팀워크 >= 0 ? parseNumber(row[COL.팀워크]) : 0,
+        스팀팩상자개봉: COL.스팀팩상자개봉 >= 0 ? parseNumber(row[COL.스팀팩상자개봉]) : 0,
+        신발소켓개방: COL.신발소켓개방 >= 0 ? parseNumber(row[COL.신발소켓개방]) : 0,
+        장비소켓개방: COL.장비소켓개방 >= 0 ? parseNumber(row[COL.장비소켓개방]) : 0,
+        첫구매패키지: COL.첫구매패키지 >= 0 ? parseNumber(row[COL.첫구매패키지]) : 0,
+        슈퍼즈응원단슬롯개방: COL.슈퍼즈응원단슬롯개방 >= 0 ? parseNumber(row[COL.슈퍼즈응원단슬롯개방]) : 0,
+        슈퍼즈캔디구매: COL.슈퍼즈캔디구매 >= 0 ? parseNumber(row[COL.슈퍼즈캔디구매]) : 0,
+        확률구매신발: COL.확률구매신발 >= 0 ? parseNumber(row[COL.확률구매신발]) : 0,
+        확률구매슈퍼즈: COL.확률구매슈퍼즈 >= 0 ? parseNumber(row[COL.확률구매슈퍼즈]) : 0,
+        거래수수료신발: COL.거래수수료신발 >= 0 ? parseNumber(row[COL.거래수수료신발]) : 0,
+        거래수수료슈퍼즈: COL.거래수수료슈퍼즈 >= 0 ? parseNumber(row[COL.거래수수료슈퍼즈]) : 0,
+        이벤트상점: COL.이벤트상점 >= 0 ? parseNumber(row[COL.이벤트상점]) : 0,
         특가상품: COL.특가상품 >= 0 ? parseNumber(row[COL.특가상품]) : 0,
-        이벤트: COL.이벤트 >= 0 ? parseNumber(row[COL.이벤트]) : 0,
-        광고네트워크: COL.광고네트워크 >= 0 ? parseNumber(row[COL.광고네트워크]) : 0,
-        광고직판: COL.광고직판 >= 0 ? parseNumber(row[COL.광고직판]) : 0,
+        자동수리패스: COL.자동수리패스 >= 0 ? parseNumber(row[COL.자동수리패스]) : 0,
+        자동멈춤패스: COL.자동멈춤패스 >= 0 ? parseNumber(row[COL.자동멈춤패스]) : 0,
+        옵션보관함A: COL.옵션보관함A >= 0 ? parseNumber(row[COL.옵션보관함A]) : 0,
+        옵션보관함B: COL.옵션보관함B >= 0 ? parseNumber(row[COL.옵션보관함B]) : 0,
+        옵션보관함C: COL.옵션보관함C >= 0 ? parseNumber(row[COL.옵션보관함C]) : 0,
+        교환수수료: COL.교환수수료 >= 0 ? parseNumber(row[COL.교환수수료]) : 0,
+        네트워크: COL.네트워크 >= 0 ? parseNumber(row[COL.네트워크]) : 0,
+        직판: COL.직판 >= 0 ? parseNumber(row[COL.직판]) : 0,
+        공략집: COL.공략집 >= 0 ? parseNumber(row[COL.공략집]) : 0,
+        배경화면: COL.배경화면 >= 0 ? parseNumber(row[COL.배경화면]) : 0,
       };
 
       const dayData = {
@@ -242,20 +284,19 @@ function calculateRevenueStats(data) {
   if (!data || data.length === 0) return null;
 
   const totals = data.map(d => d.total);
-  const latest = totals[0];
-  const previous = totals[1] || latest;
-  const avg7Day = totals.reduce((sum, t) => sum + t, 0) / totals.length;
-
-  // 카테고리별 합계
-  const categoryTotals = {};
-  const categories = ['수수료', '이벤트상점', '특가상품', '자동수리패스', '자동컴플패스', '광고네트워크', '광고직판', '이커머스'];
+  const latest = totals[0];      // 가장 최근 (예: 12/21)
+  const previous = totals[1] || latest;  // 그 전날 (예: 12/20)
   
-  categories.forEach(cat => {
-    categoryTotals[cat] = data.reduce((sum, d) => sum + (d.breakdown[cat] || 0), 0);
-  });
+  // 7일 평균 계산 (최대 7일)
+  const last7Days = totals.slice(0, 7);
+  const avg7Day = last7Days.reduce((sum, t) => sum + t, 0) / last7Days.length;
 
-  // 가장 큰 수익원 찾기
-  const topCategory = Object.entries(categoryTotals)
+  // ✅ 수정: 카테고리별 - 가장 최근 날짜 기준 (일별 수익원)
+  const latestData = data[0];
+  const latestBreakdown = latestData?.breakdown || {};
+
+  // 가장 큰 수익원 찾기 (최근 1일 기준)
+  const topCategory = Object.entries(latestBreakdown)
     .filter(([_, v]) => v > 0)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 3);
@@ -269,7 +310,7 @@ function calculateRevenueStats(data) {
     totalPeriod: totals.reduce((sum, t) => sum + t, 0),
     daysCount: data.length,
     topCategories: topCategory,
-    categoryTotals,
+    latestBreakdown,
   };
 }
 
@@ -719,20 +760,22 @@ async function analyzeWithClaude(slackMessages, ceoDMs, notionData, revenueData,
     const diff = latestTotal - previousTotal;
     const diffSign = diff >= 0 ? '+' : '';
     
-    revenueSection = `📊 매출 현황 (${revenueData.sheetName} 시트, 최종 업데이트: ${revenueData.lastUpdated})
+    // 최근 날짜 (어제)
+    const latestDate = revenueData.data[0]?.date || '알 수 없음';
+    const previousDate = revenueData.data[1]?.date || '알 수 없음';
+    
+    revenueSection = `📊 매출 현황 (${revenueData.sheetName} 시트)
 
-💰 최근 매출:
-${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}
+💰 어제(${latestDate}) 매출: ${formatWon(stats.latestTotal)}
+  - 전일(${previousDate}) 매출: ${formatWon(stats.previousTotal)}
+  - 전일 대비: ${diffSign}${formatWon(Math.abs(diff))} (${stats.dayOverDayChange > 0 ? '+' : ''}${stats.dayOverDayChange}%)
+  - 7일 평균: ${formatWon(stats.avg7Day)} (평균 대비 ${stats.avgChange > 0 ? '+' : ''}${stats.avgChange}%)
 
-📈 통계:
-  - 최근 일 매출: ${formatWon(stats.latestTotal)} (${diffSign}${formatWon(Math.abs(diff))})
-  - 전일 대비: ${stats.dayOverDayChange > 0 ? '+' : ''}${stats.dayOverDayChange}%
-  - ${stats.daysCount}일 평균: ${formatWon(stats.avg7Day)}
-  - 평균 대비: ${stats.avgChange > 0 ? '+' : ''}${stats.avgChange}%
-  - 기간 총 매출: ${formatWon(stats.totalPeriod)}
+🏆 어제 Top 수익원:
+${stats.topCategories.map(([cat, val]) => `  - ${cat}: ${formatWon(val)}`).join('\n')}
 
-🏆 Top 수익원:
-${stats.topCategories.map(([cat, val]) => `  - ${cat}: ${formatWon(val)}`).join('\n')}`;
+📅 최근 7일 매출:
+${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}`;
   }
 
   // 초기 분석용 vs 일일 분석용 프롬프트
