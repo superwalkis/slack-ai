@@ -571,7 +571,7 @@ async function sendDMToCEO(analysis, stats) {
 // 메인 핸들러
 // ============================================
 module.exports = async (req, res) => {
-  const days = Math.min(parseInt(req.query?.days) || 1, 30);
+  const days = Math.min(parseInt(req.query?.days || req.body?.days) || 1, 30);
   const isInitialRun = days > 1;
 
   console.log('='.repeat(50));
