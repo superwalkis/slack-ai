@@ -163,7 +163,7 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
         start: start,
         end: end,
         startStr: event.start?.dateTime 
-          ? start.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+          ? start.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })
           : formatDateString(start),
         duration: Math.round((end - start) / (1000 * 60)), // 분 단위
         location: event.location || '',
@@ -1037,16 +1037,17 @@ CEO가 아침에 읽고 바로 의사결정하고 행동할 수 있는 브리핑
 3. 의사결정이 필요하면 옵션과 추천안 제시
 4. CEO 시간 배분 가이드 제공
 5. 스레드 맥락 파악 - 결론 난 건 [해결됨] 표시
+6. 캘린더 데이터가 있으면 반드시 오늘 일정과 미팅 브리프에 포함할 것
+
+═══════════════════════════════════
+[CEO 캘린더] ★ 중요: 아래 일정을 "오늘 일정"과 "미팅 브리프"에 반드시 반영하세요
+═══════════════════════════════════
+${calendarSection}
 
 ═══════════════════════════════════
 [매출 데이터]
 ═══════════════════════════════════
 ${revenueSection}
-
-═══════════════════════════════════
-[CEO 캘린더]
-═══════════════════════════════════
-${calendarSection}
 
 ═══════════════════════════════════
 [Slack 채널 대화]
