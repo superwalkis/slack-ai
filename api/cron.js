@@ -972,7 +972,9 @@ ${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}`;
 
   // 캘린더 데이터 포맷팅
   let calendarSection = '캘린더 데이터 없음';
-  if (calendarData) {
+  console.log('📅 캘린더 데이터 확인:', calendarData ? `있음 (오늘 ${calendarData.today?.length}건)` : '없음');
+  
+  if (calendarData && calendarData.today) {
     const todayList = calendarData.today.length > 0
       ? calendarData.today.map(e => {
           const typeTag = e.eventType === 'meeting' ? '🟠' :   // 주황 = 미팅
@@ -999,7 +1001,7 @@ ${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}`;
       ? calendarData.freeSlots.map(s => `  - ${s.date} ${s.start}부터 ${s.duration}`).join('\n')
       : '  (빈 시간 없음)';
 
-    const hbt = calendarData.stats.hoursByType;
+    const hbt = calendarData.stats?.hoursByType || { meeting: 0, product: 0, ops: 0, growth: 0, personal: 0 };
     
     calendarSection = `[오늘 일정] (🟠미팅 🟣프로덕트 🔵운영 🟢자기계발 🟡여가)
 ${todayList}
@@ -1010,7 +1012,7 @@ ${todayList}
 - 🔵 운영업무(HR/경영지원): ${hbt.ops}시간
 - 🟢 자기계발: ${hbt.growth}시간
 - 🟡 여가: ${hbt.personal}시간
-- 전체: ${calendarData.stats.totalScheduledHours}시간
+- 전체: ${calendarData.stats?.totalScheduledHours || 0}시간
 
 [향후 주요 일정]
 ${upcomingList}
