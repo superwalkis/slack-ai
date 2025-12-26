@@ -112,15 +112,19 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
 
     const events = response.data.items || [];
     
-    // 이벤트 분류
+    // 이벤트 분류 (한국 시간 기준)
     const pastEvents = [];
     const todayEvents = [];
     const upcomingEvents = [];
     
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const todayEnd = new Date();
-    todayEnd.setHours(23, 59, 59, 999);
+    // 한국 시간 기준 오늘 시작/끝
+    const kstNow = new Date(now.getTime() + (9 * 60 * 60 * 1000));
+    const todayStart = new Date(kstNow);
+    todayStart.setUTCHours(0 - 9, 0, 0, 0); // KST 00:00 = UTC 전날 15:00
+    const todayEnd = new Date(kstNow);
+    todayEnd.setUTCHours(23 - 9, 59, 59, 999); // KST 23:59 = UTC 14:59
+    
+    console.log(`📅 오늘 범위 (KST): ${todayStart.toISOString()} ~ ${todayEnd.toISOString()}`);
 
     for (const event of events) {
       const start = new Date(event.start?.dateTime || event.start?.date);
@@ -189,9 +193,9 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
       }
     }
 
-    // 이번 주 시간 분석
+    // 이번 주 시간 분석 (한국 시간 기준)
     const thisWeekEvents = [...todayEvents, ...upcomingEvents].filter(e => {
-      const daysDiff = (e.start - now) / (1000 * 60 * 60 * 24);
+      const daysDiff = (e.start - kstNow) / (1000 * 60 * 60 * 24);
       return daysDiff <= 7;
     });
 
