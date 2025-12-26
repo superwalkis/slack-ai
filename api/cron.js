@@ -21,7 +21,6 @@ const notion = new Client({
 // 날짜 유틸리티 함수들
 // ============================================
 function getKSTDate(date = new Date()) {
-  // UTC+9 한국 시간으로 변환
   const kstOffset = 9 * 60 * 60 * 1000;
   return new Date(date.getTime() + kstOffset);
 }
@@ -48,21 +47,16 @@ function isValidDateRow(dateStr) {
 }
 
 // ============================================
-// 금액 포맷팅 (억/만원 단위)
+// 금액 포맷팅
 // ============================================
 function formatWon(amount) {
   if (!amount || amount === 0) return '₩0';
-
   if (amount >= 100_000_000) {
-    const v = (amount / 100_000_000).toFixed(1);
-    return `₩${v}억`;
+    return `₩${(amount / 100_000_000).toFixed(1)}억`;
   }
-
   if (amount >= 10_000) {
-    const v = (amount / 10_000).toFixed(1);
-    return `₩${v}만`;
+    return `₩${(amount / 10_000).toFixed(1)}만`;
   }
-
   return '₩' + amount.toLocaleString('ko-KR');
 }
 
@@ -74,7 +68,186 @@ function parseNumber(str) {
 }
 
 // ============================================
-// Google Sheets 매출 데이터 수집 (개선됨)
+// Google Calendar 일정 수집 (NEW)
+// ============================================
+async function getCalendarEvents(daysBack = 1, daysForward = 7) {
+  try {
+    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '{}');
+    
+    if (!credentials.client_email) {
+      console.log('Google 서비스 계정 미설정 - 캘린더 스킵');
+      return null;
+    }
+
+    // CEO 이메일 (환경변수로 설정 필요)
+    const ceoEmail = process.env.CEO_GOOGLE_EMAIL;
+    if (!ceoEmail) {
+      console.log('CEO_GOOGLE_EMAIL 미설정 - 캘린더 스킵');
+      return null;
+    }
+
+    const auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: ['https://www.googleapis.com/auth/calendar.readonly'],
+    });
+
+    // 도메인 전체 위임 사용 - 서비스 계정이 CEO 대신 행동
+    const authClient = await auth.getClient();
+    authClient.subject = ceoEmail;
+
+    const calendar = google.calendar({ version: 'v3', auth: authClient });
+
+    const now = new Date();
+    const timeMin = new Date(now.getTime() - (daysBack * 24 * 60 * 60 * 1000));
+    const timeMax = new Date(now.getTime() + (daysForward * 24 * 60 * 60 * 1000));
+
+    const response = await calendar.events.list({
+      calendarId: ceoEmail, // 또는 'primary'
+      timeMin: timeMin.toISOString(),
+      timeMax: timeMax.toISOString(),
+      singleEvents: true,
+      orderBy: 'startTime',
+      maxResults: 50,
+    });
+
+    const events = response.data.items || [];
+    
+    // 이벤트 분류
+    const pastEvents = [];
+    const todayEvents = [];
+    const upcomingEvents = [];
+    
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date();
+    todayEnd.setHours(23, 59, 59, 999);
+
+    for (const event of events) {
+      const start = new Date(event.start?.dateTime || event.start?.date);
+      const end = new Date(event.end?.dateTime || event.end?.date);
+      
+      const eventData = {
+        id: event.id,
+        title: event.summary || '제목 없음',
+        start: start,
+        end: end,
+        startStr: event.start?.dateTime 
+          ? start.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+          : formatDateString(start),
+        duration: Math.round((end - start) / (1000 * 60)), // 분 단위
+        location: event.location || '',
+        description: event.description || '',
+        attendees: (event.attendees || []).map(a => ({
+          email: a.email,
+          name: a.displayName || a.email.split('@')[0],
+          response: a.responseStatus,
+        })),
+        isAllDay: !event.start?.dateTime,
+        meetLink: event.hangoutLink || '',
+      };
+
+      if (start < todayStart) {
+        pastEvents.push(eventData);
+      } else if (start >= todayStart && start <= todayEnd) {
+        todayEvents.push(eventData);
+      } else {
+        upcomingEvents.push(eventData);
+      }
+    }
+
+    // 이번 주 시간 분석
+    const thisWeekEvents = [...todayEvents, ...upcomingEvents].filter(e => {
+      const daysDiff = (e.start - now) / (1000 * 60 * 60 * 24);
+      return daysDiff <= 7;
+    });
+
+    const meetingMinutes = thisWeekEvents
+      .filter(e => !e.isAllDay)
+      .reduce((sum, e) => sum + e.duration, 0);
+
+    const meetingHours = Math.round(meetingMinutes / 60 * 10) / 10;
+    
+    // 카테고리별 분류 (제목 키워드 기반)
+    const categories = {
+      '1:1': thisWeekEvents.filter(e => /1:1|1on1|면담/.test(e.title)).length,
+      '팀미팅': thisWeekEvents.filter(e => /팀|스탠드업|싱크|sync|standup/.test(e.title.toLowerCase())).length,
+      '외부미팅': thisWeekEvents.filter(e => e.attendees.some(a => !a.email.includes(process.env.COMPANY_DOMAIN || ''))).length,
+      '집중시간': thisWeekEvents.filter(e => /집중|focus|블록|block/.test(e.title.toLowerCase())).length,
+    };
+
+    // 빈 시간대 분석 (오전 9시-오후 6시 기준)
+    const freeSlots = calculateFreeSlots(todayEvents, upcomingEvents.slice(0, 20));
+
+    console.log(`📅 캘린더: 과거 ${pastEvents.length}개, 오늘 ${todayEvents.length}개, 예정 ${upcomingEvents.length}개`);
+
+    return {
+      past: pastEvents,
+      today: todayEvents,
+      upcoming: upcomingEvents,
+      thisWeek: thisWeekEvents,
+      stats: {
+        meetingHoursThisWeek: meetingHours,
+        categories,
+        totalEventsThisWeek: thisWeekEvents.length,
+      },
+      freeSlots,
+    };
+  } catch (error) {
+    console.error('Google Calendar 가져오기 실패:', error.message);
+    return null;
+  }
+}
+
+function calculateFreeSlots(todayEvents, upcomingEvents) {
+  const slots = [];
+  const workStart = 9; // 오전 9시
+  const workEnd = 18; // 오후 6시
+  
+  // 오늘 남은 빈 시간
+  const now = new Date();
+  const currentHour = now.getHours();
+  
+  if (currentHour < workEnd) {
+    const todayBusy = todayEvents
+      .filter(e => !e.isAllDay)
+      .map(e => ({
+        start: e.start.getHours() + e.start.getMinutes() / 60,
+        end: e.end.getHours() + e.end.getMinutes() / 60,
+      }))
+      .sort((a, b) => a.start - b.start);
+
+    let freeStart = Math.max(currentHour, workStart);
+    for (const busy of todayBusy) {
+      if (busy.start > freeStart && busy.start < workEnd) {
+        const duration = busy.start - freeStart;
+        if (duration >= 1) { // 1시간 이상만
+          slots.push({
+            date: '오늘',
+            start: `${Math.floor(freeStart)}시`,
+            duration: `${Math.round(duration)}시간`,
+          });
+        }
+      }
+      freeStart = Math.max(freeStart, busy.end);
+    }
+    
+    if (freeStart < workEnd) {
+      const duration = workEnd - freeStart;
+      if (duration >= 1) {
+        slots.push({
+          date: '오늘',
+          start: `${Math.floor(freeStart)}시`,
+          duration: `${Math.round(duration)}시간`,
+        });
+      }
+    }
+  }
+
+  return slots.slice(0, 5); // 상위 5개만
+}
+
+// ============================================
+// Google Sheets 매출 데이터 수집
 // ============================================
 async function getRevenueData(days = 7) {
   try {
@@ -93,14 +266,11 @@ async function getRevenueData(days = 7) {
     const sheets = google.sheets({ version: 'v4', auth });
     const spreadsheetId = '1e97jBZ9tSsJ0RiU8aGwp_t6w5RW-5olZ8G1fLYhTy8g';
     
-    // 한국 시간 기준 현재 월
     const kstNow = getKSTDate();
     const sheetName = `${String(kstNow.getFullYear()).slice(2)}.${String(kstNow.getMonth() + 1).padStart(2, '0')}`;
     
     console.log(`📊 시트 이름: ${sheetName}`);
-    console.log(`📅 한국 시간: ${kstNow.toISOString()}`);
     
-    // 전체 범위 가져오기 (A:AD까지 - 날짜 컬럼 AC 포함)
     const range = `${sheetName}!A:AD`;
     
     const response = await sheets.spreadsheets.values.get({
@@ -110,15 +280,12 @@ async function getRevenueData(days = 7) {
 
     const rows = response.data.values;
     if (!rows || rows.length < 4) {
-      console.log('매출 데이터 없음 - 행 수:', rows?.length || 0);
       return null;
     }
 
-    // 헤더 분석 (2번째 행이 헤더)
     const headers = rows[1] || [];
-    console.log('📋 헤더:', headers.slice(0, 10).join(', '), '...');
     
-    // 날짜 컬럼과 합계 컬럼 찾기
+    // 날짜/합계 컬럼 찾기
     let dateColIndex = -1;
     let totalColIndex = -1;
     
@@ -129,18 +296,12 @@ async function getRevenueData(days = 7) {
       if (h === '합계') totalColIndex = idx;
     });
     
-    console.log(`📍 날짜 컬럼: ${dateColIndex}, 합계 컬럼: ${totalColIndex}`);
-    
-    // 날짜 컬럼이 없으면 마지막 컬럼 근처에서 찾기 (AC열 = 28)
     if (dateColIndex === -1) {
-      // AC열(28번 인덱스) 확인
       for (let i = 25; i < Math.min(headers.length + 5, 35); i++) {
-        // 데이터 행에서 날짜 형식 찾기
         for (let rowIdx = 3; rowIdx < Math.min(rows.length, 10); rowIdx++) {
           const cell = rows[rowIdx]?.[i];
           if (cell && isValidDateRow(cell)) {
             dateColIndex = i;
-            console.log(`📍 날짜 컬럼 발견 (데이터 기반): ${dateColIndex}`);
             break;
           }
         }
@@ -148,13 +309,11 @@ async function getRevenueData(days = 7) {
       }
     }
     
-    // 합계 컬럼이 없으면 날짜 컬럼 바로 앞에서 찾기
     if (totalColIndex === -1 && dateColIndex > 0) {
       totalColIndex = dateColIndex - 1;
-      console.log(`📍 합계 컬럼 추정 (날짜 앞): ${totalColIndex}`);
     }
 
-    // 개별 수익 카테고리 컬럼 찾기 (기존 로직 유지)
+    // 카테고리 컬럼 찾기
     const findCol = (keywords) => {
       return headers.findIndex(h => h && keywords.some(k => String(h).includes(k)));
     };
@@ -186,77 +345,68 @@ async function getRevenueData(days = 7) {
       배경화면: findCol(['배경화면']),
     };
 
-    // 데이터 수집
     const revenueData = [];
     const yesterdayStr = getYesterdayDateString();
-    console.log(`📅 어제 날짜 (기대값): ${yesterdayStr}`);
     
     for (let i = 3; i < rows.length; i++) {
       const row = rows[i];
       if (!row || row.length < 5) continue;
       
-      // 날짜 가져오기
       const dateStr = dateColIndex >= 0 ? row[dateColIndex] : null;
       if (!isValidDateRow(dateStr)) continue;
       
-      // 합계 가져오기 (합계 컬럼에서 직접 가져오기)
       let total = 0;
       if (totalColIndex >= 0) {
         total = parseNumber(row[totalColIndex]);
       }
       
-      // 합계가 0이면 데이터 없는 날로 처리 (하지만 기록은 남김)
       const hasData = total > 0;
       
-      // 개별 카테고리 breakdown
       const breakdown = {};
       for (const [category, colIdx] of Object.entries(categoryColumns)) {
-        if (colIdx >= 0) {
-          breakdown[category] = parseNumber(row[colIdx]);
-        } else {
-          breakdown[category] = 0;
-        }
+        breakdown[category] = colIdx >= 0 ? parseNumber(row[colIdx]) : 0;
       }
 
-      const dayData = {
+      revenueData.push({
         date: dateStr,
-        total: total,
-        hasData: hasData,
-        breakdown: breakdown,
-      };
-      
-      revenueData.push(dayData);
-      
-      // 디버깅: 최근 7일 데이터 출력
-      if (revenueData.length <= 7) {
-        console.log(`  ${dateStr}: ${formatWon(total)} ${hasData ? '✓' : '(데이터 없음)'}`);
-      }
+        total,
+        hasData,
+        breakdown,
+      });
     }
 
-    if (revenueData.length === 0) {
-      return null;
-    }
+    if (revenueData.length === 0) return null;
 
-    // 날짜 내림차순 정렬
     revenueData.sort((a, b) => new Date(b.date) - new Date(a.date));
 
-    // 어제 데이터 확인
     const yesterdayData = revenueData.find(d => d.date === yesterdayStr);
     const hasYesterdayData = yesterdayData && yesterdayData.hasData;
-    
-    // 가장 최근 유효 데이터 찾기
     const latestValidData = revenueData.find(d => d.hasData);
-    
-    console.log(`📊 어제(${yesterdayStr}) 데이터: ${hasYesterdayData ? formatWon(yesterdayData.total) : '없음'}`);
-    console.log(`📊 최신 유효 데이터: ${latestValidData ? `${latestValidData.date} - ${formatWon(latestValidData.total)}` : '없음'}`);
-
-    // 유효한 데이터만 필터링해서 통계 계산
     const validData = revenueData.filter(d => d.hasData);
-    const recentValidData = validData.slice(0, days);
-    const stats = calculateRevenueStats(recentValidData);
+    
+    // 월간 목표 대비 분석 (환경변수로 설정 가능)
+    const monthlyTarget = parseInt(process.env.MONTHLY_REVENUE_TARGET) || 200_000_000; // 기본 2억
+    const currentMonth = kstNow.getMonth() + 1;
+    const daysInMonth = new Date(kstNow.getFullYear(), currentMonth, 0).getDate();
+    const currentDay = kstNow.getDate();
+    const remainingDays = daysInMonth - currentDay + 1;
+    
+    const mtdRevenue = validData
+      .filter(d => d.date.startsWith(`${kstNow.getFullYear()}-${String(currentMonth).padStart(2, '0')}`))
+      .reduce((sum, d) => sum + d.total, 0);
+    
+    const targetProgress = (mtdRevenue / monthlyTarget * 100).toFixed(1);
+    const requiredDailyAvg = remainingDays > 0 
+      ? Math.round((monthlyTarget - mtdRevenue) / remainingDays)
+      : 0;
+    
+    const last7DaysAvg = validData.slice(0, 7).reduce((sum, d) => sum + d.total, 0) / Math.min(7, validData.length);
+    const projectedMonthEnd = mtdRevenue + (last7DaysAvg * remainingDays);
+
+    const stats = calculateRevenueStats(validData.slice(0, days));
 
     return {
-      data: recentValidData,
+      data: validData.slice(0, days),
       allData: revenueData,
       stats,
       sheetName,
@@ -264,6 +414,17 @@ async function getRevenueData(days = 7) {
       yesterdayStr,
       hasYesterdayData,
       yesterdayTotal: hasYesterdayData ? yesterdayData.total : null,
+      // 목표 대비 분석
+      monthlyAnalysis: {
+        target: monthlyTarget,
+        mtd: mtdRevenue,
+        progress: parseFloat(targetProgress),
+        remainingDays,
+        requiredDailyAvg,
+        last7DaysAvg: Math.round(last7DaysAvg),
+        projectedMonthEnd: Math.round(projectedMonthEnd),
+        onTrack: projectedMonthEnd >= monthlyTarget * 0.9,
+      },
     };
   } catch (error) {
     console.error('Google Sheets 매출 데이터 가져오기 실패:', error.message);
@@ -291,13 +452,12 @@ function calculateRevenueStats(data) {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5);
 
-  // 7일 카테고리별 합계 (트렌드 파악용)
-  const categoryTotals = {};
-  data.slice(0, 7).forEach(d => {
-    Object.entries(d.breakdown).forEach(([cat, val]) => {
-      categoryTotals[cat] = (categoryTotals[cat] || 0) + val;
-    });
-  });
+  // 7일 트렌드 (상승/하락)
+  const trend = totals.length >= 3 
+    ? (totals[0] + totals[1]) / 2 > (totals[totals.length - 2] + totals[totals.length - 1]) / 2
+      ? 'up'
+      : 'down'
+    : 'stable';
 
   return {
     latestDate: latestData?.date,
@@ -312,12 +472,12 @@ function calculateRevenueStats(data) {
     daysCount: data.length,
     topCategories: topCategory,
     latestBreakdown,
-    categoryTotals,
+    trend,
   };
 }
 
 // ============================================
-// Slack 채널 메시지 수집 (스레드 강화)
+// Slack 메시지 수집 (스레드 강화)
 // ============================================
 async function getSlackMessages(days = 1) {
   try {
@@ -348,7 +508,7 @@ async function getSlackMessages(days = 1) {
         });
 
         for (const msg of history.messages) {
-          const mainMessage = {
+          allMessages.push({
             channel: channel.name,
             user: msg.user,
             userName: userMap[msg.user] || '알 수 없음',
@@ -357,22 +517,17 @@ async function getSlackMessages(days = 1) {
             isThread: false,
             replyCount: msg.reply_count || 0,
             threadTs: msg.thread_ts,
-          };
-          allMessages.push(mainMessage);
+          });
 
-          // 개선: 스레드가 있으면 무조건 가져오기 (reply_count 체크 완화)
-          // thread_ts가 있으면 스레드 부모이거나 스레드에 속한 메시지
           if (msg.thread_ts) {
             try {
               const replies = await slack.conversations.replies({
                 channel: channel.id,
                 ts: msg.thread_ts,
-                limit: 200, // 100 -> 200으로 증가
+                limit: 200,
               });
 
-              // 첫 번째 메시지(부모)를 제외한 모든 답글
               for (const reply of replies.messages.slice(1)) {
-                // 중복 방지: 이미 수집된 메시지인지 확인
                 const isDuplicate = allMessages.some(
                   m => m.timestamp === reply.ts && m.channel === channel.name
                 );
@@ -391,17 +546,12 @@ async function getSlackMessages(days = 1) {
                   threadCount++;
                 }
               }
-            } catch (err) {
-              console.log(`스레드 접근 실패 (${channel.name}):`, err.message);
-            }
+            } catch (err) {}
           }
         }
 
         await new Promise(resolve => setTimeout(resolve, 200));
-
-      } catch (err) {
-        console.log(`채널 접근 불가 (${channel.name}):`, err.message);
-      }
+      } catch (err) {}
     }
 
     console.log(`📧 스레드 댓글 수집: ${threadCount}개`);
@@ -413,7 +563,7 @@ async function getSlackMessages(days = 1) {
 }
 
 // ============================================
-// CEO DM 수집 (스레드 강화)
+// CEO DM 수집
 // ============================================
 async function getCEODirectMessages(userMap, days = 1) {
   try {
@@ -453,7 +603,6 @@ async function getCEODirectMessages(userMap, days = 1) {
               replyCount: msg.reply_count || 0,
             });
 
-            // 개선: 스레드 무조건 확인
             if (msg.thread_ts) {
               try {
                 const replies = await slackUser.conversations.replies({
@@ -481,18 +630,13 @@ async function getCEODirectMessages(userMap, days = 1) {
                     threadCount++;
                   }
                 }
-              } catch (err) {
-                // 스레드 접근 실패
-              }
+              } catch (err) {}
             }
           }
         }
 
         await new Promise(resolve => setTimeout(resolve, 100));
-
-      } catch (err) {
-        // DM 접근 실패
-      }
+      } catch (err) {}
     }
 
     console.log(`💬 DM 스레드 댓글 수집: ${threadCount}개`);
@@ -504,42 +648,26 @@ async function getCEODirectMessages(userMap, days = 1) {
 }
 
 // ============================================
-// Notion 데이터 수집 (깊이 강화)
+// Notion 데이터 수집
 // ============================================
 async function getRecentNotionPages(days = 1) {
   try {
     const since = new Date(Date.now() - (86400000 * days)).toISOString();
     
-    // 1. 검색으로 최근 수정된 페이지 가져오기
     const response = await notion.search({
-      filter: {
-        property: 'object',
-        value: 'page',
-      },
-      sort: {
-        direction: 'descending',
-        timestamp: 'last_edited_time',
-      },
-      page_size: 100, // 50 -> 100으로 증가
+      filter: { property: 'object', value: 'page' },
+      sort: { direction: 'descending', timestamp: 'last_edited_time' },
+      page_size: 100,
     });
 
-    const recentPages = response.results.filter(page => {
-      return page.last_edited_time >= since;
-    });
-
-    console.log(`📄 Notion 최근 수정 페이지: ${recentPages.length}개`);
-
+    const recentPages = response.results.filter(page => page.last_edited_time >= since);
     const pagesWithContent = [];
 
-    for (const page of recentPages.slice(0, 30)) { // 20 -> 30으로 증가
+    for (const page of recentPages.slice(0, 30)) {
       try {
         const pageInfo = await getPageInfoDeep(page);
-        if (pageInfo) {
-          pagesWithContent.push(pageInfo);
-        }
-      } catch (err) {
-        console.log(`페이지 정보 가져오기 실패 (${page.id}):`, err.message);
-      }
+        if (pageInfo) pagesWithContent.push(pageInfo);
+      } catch (err) {}
     }
 
     return pagesWithContent;
@@ -549,40 +677,30 @@ async function getRecentNotionPages(days = 1) {
   }
 }
 
-// 개선: 하위 블록까지 재귀적으로 탐색
 async function getPageInfoDeep(page) {
   try {
     let title = '제목 없음';
     if (page.properties) {
-      const titleProp = Object.values(page.properties).find(
-        prop => prop.type === 'title'
-      );
-      if (titleProp && titleProp.title && titleProp.title[0]) {
-        title = titleProp.title[0].plain_text;
-      }
+      const titleProp = Object.values(page.properties).find(prop => prop.type === 'title');
+      if (titleProp?.title?.[0]) title = titleProp.title[0].plain_text;
     }
 
-    // 재귀적으로 블록 내용 가져오기
-    const content = await getBlockContentRecursive(page.id, 2); // depth 2까지
+    const content = await getBlockContentRecursive(page.id, 2);
 
     let comments = [];
     try {
-      const commentsResponse = await notion.comments.list({
-        block_id: page.id,
-      });
+      const commentsResponse = await notion.comments.list({ block_id: page.id });
       comments = commentsResponse.results.map(comment => ({
         author: comment.created_by?.id || 'unknown',
         text: comment.rich_text?.map(t => t.plain_text).join('') || '',
         createdAt: comment.created_time,
       }));
-    } catch (err) {
-      // 댓글 접근 실패
-    }
+    } catch (err) {}
 
     return {
       id: page.id,
       title,
-      content: content.slice(0, 1500), // 1000 -> 1500
+      content: content.slice(0, 1500),
       lastEditedTime: page.last_edited_time,
       lastEditedBy: page.last_edited_by?.id || 'unknown',
       comments,
@@ -597,11 +715,7 @@ async function getBlockContentRecursive(blockId, maxDepth, currentDepth = 0) {
   if (currentDepth >= maxDepth) return '';
   
   try {
-    const blocks = await notion.blocks.children.list({
-      block_id: blockId,
-      page_size: 50,
-    });
-
+    const blocks = await notion.blocks.children.list({ block_id: blockId, page_size: 50 });
     let content = '';
     
     for (const block of blocks.results) {
@@ -611,14 +725,8 @@ async function getBlockContentRecursive(blockId, maxDepth, currentDepth = 0) {
         content += `${indent}${text}\n`;
       }
       
-      // 하위 블록이 있으면 재귀 탐색
       if (block.has_children) {
-        const childContent = await getBlockContentRecursive(
-          block.id, 
-          maxDepth, 
-          currentDepth + 1
-        );
-        content += childContent;
+        content += await getBlockContentRecursive(block.id, maxDepth, currentDepth + 1);
       }
     }
 
@@ -631,35 +739,20 @@ async function getBlockContentRecursive(blockId, maxDepth, currentDepth = 0) {
 function extractTextFromBlock(block) {
   const type = block.type;
   const content = block[type];
+  if (!content?.rich_text) return '';
   
-  if (!content) return '';
+  const text = content.rich_text.map(t => t.plain_text).join('');
   
-  if (content.rich_text) {
-    const text = content.rich_text.map(t => t.plain_text).join('');
-    
-    // 블록 타입에 따른 접두사
-    switch (type) {
-      case 'heading_1':
-        return `# ${text}`;
-      case 'heading_2':
-        return `## ${text}`;
-      case 'heading_3':
-        return `### ${text}`;
-      case 'bulleted_list_item':
-        return `• ${text}`;
-      case 'numbered_list_item':
-        return `- ${text}`;
-      case 'to_do':
-        const checked = content.checked ? '✓' : '○';
-        return `${checked} ${text}`;
-      case 'toggle':
-        return `▸ ${text}`;
-      default:
-        return text;
-    }
+  switch (type) {
+    case 'heading_1': return `# ${text}`;
+    case 'heading_2': return `## ${text}`;
+    case 'heading_3': return `### ${text}`;
+    case 'bulleted_list_item': return `• ${text}`;
+    case 'numbered_list_item': return `- ${text}`;
+    case 'to_do': return `${content.checked ? '✓' : '○'} ${text}`;
+    case 'toggle': return `▸ ${text}`;
+    default: return text;
   }
-  
-  return '';
 }
 
 async function getNotionDatabases(days = 1) {
@@ -667,58 +760,35 @@ async function getNotionDatabases(days = 1) {
     const since = new Date(Date.now() - (86400000 * days)).toISOString();
     
     const response = await notion.search({
-      filter: {
-        property: 'object',
-        value: 'database',
-      },
-      page_size: 30, // 20 -> 30
+      filter: { property: 'object', value: 'database' },
+      page_size: 30,
     });
 
     const databaseSummaries = [];
 
     for (const db of response.results) {
       try {
-        let dbTitle = '제목 없음';
-        if (db.title && db.title[0]) {
-          dbTitle = db.title[0].plain_text;
-        }
+        let dbTitle = db.title?.[0]?.plain_text || '제목 없음';
 
         const items = await notion.databases.query({
           database_id: db.id,
           filter: {
             timestamp: 'last_edited_time',
-            last_edited_time: {
-              on_or_after: since,
-            },
+            last_edited_time: { on_or_after: since },
           },
-          page_size: 20, // 10 -> 20
+          page_size: 20,
         });
 
         if (items.results.length > 0) {
           const itemSummaries = items.results.map(item => {
-            const titleProp = Object.values(item.properties).find(
-              p => p.type === 'title'
-            );
+            const titleProp = Object.values(item.properties).find(p => p.type === 'title');
             const title = titleProp?.title?.[0]?.plain_text || '제목 없음';
-
-            const statusProp = Object.values(item.properties).find(
-              p => p.type === 'status' || p.type === 'select'
-            );
-            const status = statusProp?.status?.name || 
-                          statusProp?.select?.name || '';
-
-            // 추가 속성 수집
-            const dateProp = Object.values(item.properties).find(
-              p => p.type === 'date'
-            );
+            const statusProp = Object.values(item.properties).find(p => p.type === 'status' || p.type === 'select');
+            const status = statusProp?.status?.name || statusProp?.select?.name || '';
+            const dateProp = Object.values(item.properties).find(p => p.type === 'date');
             const date = dateProp?.date?.start || '';
 
-            return { 
-              title, 
-              status, 
-              date,
-              lastEdited: item.last_edited_time,
-            };
+            return { title, status, date, lastEdited: item.last_edited_time };
           });
 
           databaseSummaries.push({
@@ -727,9 +797,7 @@ async function getNotionDatabases(days = 1) {
             totalUpdated: items.results.length,
           });
         }
-      } catch (err) {
-        // 데이터베이스 쿼리 실패
-      }
+      } catch (err) {}
     }
 
     return databaseSummaries;
@@ -743,11 +811,9 @@ async function getNotionUsers() {
   try {
     const response = await notion.users.list();
     const userMap = {};
-    
     response.results.forEach(user => {
       userMap[user.id] = user.name || user.id;
     });
-
     return userMap;
   } catch (error) {
     return {};
@@ -755,87 +821,67 @@ async function getNotionUsers() {
 }
 
 // ============================================
-// Claude 분석 (개선된 프롬프트)
+// Claude 분석 (의사결정 지원 시스템)
 // ============================================
-async function analyzeWithClaude(slackMessages, ceoDMs, notionData, revenueData, days = 1) {
+async function analyzeWithClaude(slackMessages, ceoDMs, notionData, revenueData, calendarData, days = 1) {
   const { pages, databases, users } = notionData;
 
-  // Slack 채널 메시지 포맷팅 (시간순 정렬)
+  // Slack 포맷팅
   let slackSection = '메시지 없음';
   if (slackMessages.length > 0) {
-    const sortedMessages = [...slackMessages].sort((a, b) => 
-      parseFloat(a.timestamp) - parseFloat(b.timestamp)
-    );
-    
-    slackSection = sortedMessages
-      .map(m => {
-        const threadTag = m.isThread ? '  ↳ [스레드]' : '';
-        const replyInfo = m.replyCount > 0 ? ` (답글 ${m.replyCount}개)` : '';
-        return `${threadTag}[${m.channel}] ${m.userName}: ${m.text}${replyInfo}`;
-      })
-      .join('\n');
+    const sorted = [...slackMessages].sort((a, b) => parseFloat(a.timestamp) - parseFloat(b.timestamp));
+    slackSection = sorted.map(m => {
+      const threadTag = m.isThread ? '  ↳ [스레드]' : '';
+      const replyInfo = m.replyCount > 0 ? ` (답글 ${m.replyCount}개)` : '';
+      return `${threadTag}[${m.channel}] ${m.userName}: ${m.text}${replyInfo}`;
+    }).join('\n');
   }
 
-  // CEO DM 포맷팅 (시간순 정렬)
+  // DM 포맷팅
   let dmSection = 'DM 없음';
   if (ceoDMs.length > 0) {
-    const sortedDMs = [...ceoDMs].sort((a, b) => 
-      parseFloat(a.timestamp) - parseFloat(b.timestamp)
-    );
-    
-    dmSection = sortedDMs
-      .map(m => {
-        const threadTag = m.isThread ? '  ↳ [스레드]' : '';
-        const replyInfo = m.replyCount > 0 ? ` (답글 ${m.replyCount}개)` : '';
-        return `${threadTag}[${m.channel}] ${m.userName}: ${m.text}${replyInfo}`;
-      })
-      .join('\n');
+    const sorted = [...ceoDMs].sort((a, b) => parseFloat(a.timestamp) - parseFloat(b.timestamp));
+    dmSection = sorted.map(m => {
+      const threadTag = m.isThread ? '  ↳ [스레드]' : '';
+      const replyInfo = m.replyCount > 0 ? ` (답글 ${m.replyCount}개)` : '';
+      return `${threadTag}[${m.channel}] ${m.userName}: ${m.text}${replyInfo}`;
+    }).join('\n');
   }
 
-  // Notion 페이지 포맷팅
+  // Notion 포맷팅
   let notionPagesSection = '업데이트된 페이지 없음';
   if (pages.length > 0) {
-    notionPagesSection = pages
-      .map(p => {
-        const editor = users[p.lastEditedBy] || '알 수 없음';
-        let section = `[${p.title}] (수정: ${editor})\n내용: ${p.content.slice(0, 500)}`;
-        if (p.comments.length > 0) {
-          section += `\n댓글 (${p.comments.length}개):\n`;
-          section += p.comments.map(c => 
-            `  - ${users[c.author] || '익명'}: ${c.text}`
-          ).join('\n');
-        }
-        return section;
-      })
-      .join('\n\n');
+    notionPagesSection = pages.map(p => {
+      const editor = users[p.lastEditedBy] || '알 수 없음';
+      let section = `[${p.title}] (수정: ${editor})\n내용: ${p.content.slice(0, 500)}`;
+      if (p.comments.length > 0) {
+        section += `\n댓글 (${p.comments.length}개):\n`;
+        section += p.comments.map(c => `  - ${users[c.author] || '익명'}: ${c.text}`).join('\n');
+      }
+      return section;
+    }).join('\n\n');
   }
 
-  // Notion 데이터베이스 포맷팅
   let notionDbSection = '업데이트된 데이터베이스 없음';
   if (databases.length > 0) {
-    notionDbSection = databases
-      .map(db => {
-        const items = db.recentItems
-          .map(item => `  - ${item.title}${item.status ? ` [${item.status}]` : ''}${item.date ? ` (${item.date})` : ''}`)
-          .join('\n');
-        return `[${db.name}] (${db.totalUpdated}개 업데이트)\n${items}`;
-      })
-      .join('\n\n');
+    notionDbSection = databases.map(db => {
+      const items = db.recentItems.map(item => 
+        `  - ${item.title}${item.status ? ` [${item.status}]` : ''}${item.date ? ` (${item.date})` : ''}`
+      ).join('\n');
+      return `[${db.name}] (${db.totalUpdated}개 업데이트)\n${items}`;
+    }).join('\n\n');
   }
 
-  // 매출 데이터 포맷팅 (개선됨)
+  // 매출 데이터 포맷팅 (목표 대비 분석 포함)
   let revenueSection = '매출 데이터 없음';
-  if (revenueData && revenueData.data && revenueData.data.length > 0) {
+  if (revenueData?.data?.length > 0) {
     const stats = revenueData.stats;
+    const ma = revenueData.monthlyAnalysis;
     const recentDays = revenueData.data.slice(0, 7);
     
-    // 어제 데이터 유무 명시
-    let yesterdayInfo = '';
-    if (revenueData.hasYesterdayData) {
-      yesterdayInfo = `어제(${revenueData.yesterdayStr}) 매출: ${formatWon(revenueData.yesterdayTotal)}`;
-    } else {
-      yesterdayInfo = `⚠ 어제(${revenueData.yesterdayStr}) 데이터 없음\n가장 최근 데이터: ${stats.latestDate} - ${formatWon(stats.latestTotal)}`;
-    }
+    let yesterdayInfo = revenueData.hasYesterdayData
+      ? `어제(${revenueData.yesterdayStr}) 매출: ${formatWon(revenueData.yesterdayTotal)}`
+      : `⚠ 어제(${revenueData.yesterdayStr}) 데이터 없음\n가장 최근 데이터: ${stats.latestDate} - ${formatWon(stats.latestTotal)}`;
     
     const diff = stats.dayOverDayDiff;
     const diffSign = diff >= 0 ? '+' : '';
@@ -845,7 +891,15 @@ async function analyzeWithClaude(slackMessages, ceoDMs, notionData, revenueData,
 ${yesterdayInfo}
 전일(${stats.previousDate}) 매출: ${formatWon(stats.previousTotal)}
 전일 대비: ${diffSign}${formatWon(Math.abs(diff))} (${stats.dayOverDayChange > 0 ? '+' : ''}${stats.dayOverDayChange}%)
-7일 평균: ${formatWon(stats.avg7Day)} (평균 대비 ${stats.avgChange > 0 ? '+' : ''}${stats.avgChange}%)
+7일 평균: ${formatWon(stats.avg7Day)}
+
+[월간 목표 대비 분석]
+월 목표: ${formatWon(ma.target)}
+MTD 매출: ${formatWon(ma.mtd)} (목표의 ${ma.progress}%)
+잔여 일수: ${ma.remainingDays}일
+목표 달성 필요 일평균: ${formatWon(ma.requiredDailyAvg)}
+최근 7일 평균: ${formatWon(ma.last7DaysAvg)}
+예상 월말 매출: ${formatWon(ma.projectedMonthEnd)} (${ma.onTrack ? '목표 달성 가능' : '⚠ 목표 미달 예상'})
 
 최근 데이터 수익원 Top 5:
 ${stats.topCategories.map(([cat, val]) => `  - ${cat}: ${formatWon(val)}`).join('\n')}
@@ -854,18 +908,48 @@ ${stats.topCategories.map(([cat, val]) => `  - ${cat}: ${formatWon(val)}`).join(
 ${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}`;
   }
 
+  // 캘린더 데이터 포맷팅
+  let calendarSection = '캘린더 데이터 없음';
+  if (calendarData) {
+    const todayList = calendarData.today.length > 0
+      ? calendarData.today.map(e => `  - ${e.startStr}: ${e.title} (${e.duration}분)${e.attendees.length > 0 ? ` [${e.attendees.map(a => a.name).join(', ')}]` : ''}`).join('\n')
+      : '  (일정 없음)';
+    
+    const upcomingList = calendarData.upcoming.slice(0, 10).map(e => 
+      `  - ${e.startStr}: ${e.title}${e.attendees.length > 0 ? ` [${e.attendees.map(a => a.name).join(', ')}]` : ''}`
+    ).join('\n');
+
+    const freeSlotsList = calendarData.freeSlots.length > 0
+      ? calendarData.freeSlots.map(s => `  - ${s.date} ${s.start}부터 ${s.duration}`).join('\n')
+      : '  (빈 시간 없음)';
+
+    calendarSection = `[오늘 일정]
+${todayList}
+
+[이번 주 미팅 시간: ${calendarData.stats.meetingHoursThisWeek}시간]
+- 1:1: ${calendarData.stats.categories['1:1']}건
+- 팀미팅: ${calendarData.stats.categories['팀미팅']}건
+- 외부미팅: ${calendarData.stats.categories['외부미팅']}건
+
+[향후 주요 일정]
+${upcomingList}
+
+[집중 가능 시간대]
+${freeSlotsList}`;
+  }
+
   // ============================================
-  // 개선된 프롬프트
+  // 의사결정 지원 프롬프트
   // ============================================
-  const prompt = `당신은 월 2~3억 매출 규모, 성장 과도기에 있는 스타트업 CEO의 Staff입니다.
-매일 아침 CEO가 빠르게 읽고 의사결정할 수 있는 브리핑을 작성합니다.
+  const prompt = `당신은 월 2~3억 매출의 Web3 스타트업 CEO의 Chief of Staff입니다.
+CEO가 아침에 읽고 바로 의사결정하고 행동할 수 있는 브리핑을 작성합니다.
 
 [핵심 원칙]
-1. 숫자 정확성: 단위(일간/누적/%), 오해 가능성 있으면 "⚠ 검증 필요" 표시. 추정/해석 금지.
-2. 스케일 맥락: 월 2~3억 매출 기준에서 의미 있는 것만. "누가 말을 많이 했다" 같은 건 제외.
-3. 액션 중심: 각 항목마다 "그래서 뭘 해야 하는지"가 명확해야 함.
-4. 간결함: 과장, 스토리텔링, 이모지 남발 금지. 팩트와 숫자 중심.
-5. 스레드 맥락: 스레드 내 대화는 전체 흐름을 파악해서, 최종 결론이나 합의점을 반영하세요. 중간 논의만 보고 판단하지 마세요.
+1. 목표 대비 현재 위치를 명확히 - 숫자로 Gap 표시
+2. 모든 이슈에 오너십(누가)과 데드라인(언제까지) 명시
+3. 의사결정이 필요하면 옵션과 추천안 제시
+4. CEO 시간 배분 가이드 제공
+5. 스레드 맥락 파악 - 결론 난 건 [해결됨] 표시
 
 ═══════════════════════════════════
 [매출 데이터]
@@ -873,12 +957,17 @@ ${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}`;
 ${revenueSection}
 
 ═══════════════════════════════════
-[Slack 채널 대화] (시간순, 스레드 포함)
+[CEO 캘린더]
+═══════════════════════════════════
+${calendarSection}
+
+═══════════════════════════════════
+[Slack 채널 대화]
 ═══════════════════════════════════
 ${slackSection}
 
 ═══════════════════════════════════
-[CEO DM 대화] (시간순, 스레드 포함)
+[CEO DM 대화]
 ═══════════════════════════════════
 ${dmSection}
 
@@ -896,66 +985,81 @@ ${notionDbSection}
 
 아래 형식으로 브리핑을 작성하세요. 볼드(**) 사용하지 마세요.
 
-# CEO 일일 브리핑
+# CEO 대시보드
 
-## 1) 매출/핵심 KPI
-어제: [금액] ([전일대비 %], [7일평균대비 %])
-※ 어제 데이터가 없으면 "어제 데이터 없음, 최신: [날짜] [금액]"으로 표기
-주요 수익원: [Top 3와 금액]
-이상 징후: [있으면 구체적으로, 없으면 "없음"]
+## 1) 핵심 지표 현황
+매출:
+- 어제: [금액] | 전일대비: [%] | 7일평균대비: [%]
+- 월 목표 ${revenueData?.monthlyAnalysis ? formatWon(revenueData.monthlyAnalysis.target) : '미설정'} 대비: MTD [금액] ([%])
+- 목표 달성 전망: [달성 가능/⚠ 미달 예상 - 근거]
 
-## 2) 긴급/리스크 신호 (Top 3)
-[출처] 이슈명
-- 상황: 1줄 요약
-- 왜 중요: 비즈니스 영향
-- 즉시 액션: 오늘 할 1가지
+오늘 일정: [N]건, 미팅 시간 [N]시간
+집중 가능 시간: [시간대]
 
-※ 스레드 대화에서 이미 해결된 것으로 보이는 이슈는 "[해결됨]" 표시
-(최대 3개. 긴급한 게 없으면 "긴급 이슈 없음"으로 끝)
+## 2) 의사결정 필요 (우선순위순)
 
-## 3) 전략적으로 중요한 변화
-베이직 모드 / 수익모델 / DeFi / 조직 / 교보 관련 실제 진행된 것만.
-진행 없으면 "특이사항 없음"
+### [높음] 이슈명
+배경: 1줄
+옵션:
+  A) [선택지1] → 예상 결과
+  B) [선택지2] → 예상 결과
+추천: [A/B] - [근거 1줄]
+담당: [이름] | 결정 기한: [날짜]
 
-## 4) 팀/조직 인사이트
-체크 필요한 사람:
-- [이름]: [구체적 상황과 이유]
+(의사결정 필요 없으면 "오늘 결정할 사항 없음")
 
-칭찬할 사람:
-- [이름]: [기여 내용]
+## 3) 실행 추적
 
-(의미 있는 행동이 없으면 해당 항목 생략)
+### 즉시 (오늘)
+- [ ] [할일] → [담당] | [시간/기한]
+- [ ] [할일] → [담당] | [시간/기한]
 
-## 5) 오늘 결정/실행할 것
-즉시: [오늘 중 해야 할 것]
-단기(이번주): [이번 주 내 해야 할 것]
-중기: [2주 내 해야 할 것]
+### 단기 (이번주)
+- [ ] [할일] → [담당] | [요일]까지
 
-(각 항목 없으면 생략)
+### 중기 (2주)
+- [ ] [할일] → [담당] | [날짜]까지
 
-## 6) 무시해도 좋은 것
-- [신경 쓸 필요 없는 논의들]
+(해당 없으면 항목 생략)
 
-(없으면 이 섹션 생략)
+## 4) 금주 CEO 시간 배분 권장
+
+1. [주제1] ([%]) - [이유]
+2. [주제2] ([%]) - [이유]
+3. [주제3] ([%]) - [이유]
+
+이번 주 하지 말 것: [에너지 쏟을 필요 없는 것들]
+
+## 5) 리스크 모니터링
+
+[🟢/🟡/🔴] 영역명
+- 현황: 1줄
+- 주시 포인트: 무엇을 지켜봐야 하는지
+
+(리스크 없으면 "주요 리스크 없음")
+
+## 6) 오늘의 미팅 브리프
+(오늘 일정 기반)
+
+[시간] 미팅명
+- 목적/아젠다: 
+- 준비 필요: 
+- 원하는 결과:
+
+(미팅 없으면 생략)
 
 ---
-[주의사항 다시 한번]
-- 숫자 틀리면 안 됨. 확실하지 않으면 "⚠ 확인 필요" 붙이기
-- 과장 금지. "매우 중요", "심각한" 같은 수식어 자제
+[주의사항]
+- 숫자는 정확하게, 불확실하면 "⚠ 확인 필요"
+- 담당자/기한 없는 액션 아이템 금지
 - 볼드(**) 사용 금지
-- 이모지는 섹션 제목에만 최소한으로
-- 스레드에서 결론 났거나 해결된 건 명시하기`;
+- 이모지는 최소한으로`;
 
   try {
     const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 2500,
-      messages: [
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
+      max_tokens: 3500,
+      messages: [{ role: 'user', content: prompt }],
     });
 
     return message.content[0].text;
@@ -972,16 +1076,17 @@ async function sendDMToCEO(analysis, stats) {
   try {
     const today = new Date();
     const dateStr = `${today.getMonth() + 1}/${today.getDate()}`;
-    const headerText = `📋 CEO 일일 브리핑 (${dateStr})`;
+    const dayNames = ['일', '월', '화', '수', '목', '금', '토'];
+    const dayName = dayNames[today.getDay()];
+    const headerText = `📊 CEO 대시보드 (${dateStr} ${dayName})`;
     
-    let statsText = `수집: Slack ${stats.slackCount}개 | DM ${stats.dmCount}개 | Notion ${stats.notionPages}개`;
+    let statsText = `Slack ${stats.slackCount} | DM ${stats.dmCount} | Notion ${stats.notionPages} | 스레드 ${stats.threadCount}`;
     if (stats.revenueDataAvailable) {
-      statsText += ` | 매출 데이터 포함`;
-      if (!stats.hasYesterdayData) {
-        statsText += ` (어제 데이터 없음)`;
-      }
+      statsText += ` | 매출 ${stats.hasYesterdayData ? '✓' : '(어제 데이터 없음)'}`;
     }
-    statsText += ` | 스레드 ${stats.threadCount}개`;
+    if (stats.calendarAvailable) {
+      statsText += ` | 캘린더 ✓`;
+    }
 
     await slack.chat.postMessage({
       channel: process.env.CEO_SLACK_ID,
@@ -989,51 +1094,38 @@ async function sendDMToCEO(analysis, stats) {
       blocks: [
         {
           type: 'header',
-          text: {
-            type: 'plain_text',
-            text: headerText,
-            emoji: true,
-          },
+          text: { type: 'plain_text', text: headerText, emoji: true },
         },
         {
           type: 'context',
-          elements: [
-            {
-              type: 'mrkdwn',
-              text: statsText,
-            },
-          ],
+          elements: [{ type: 'mrkdwn', text: statsText }],
         },
-        {
-          type: 'divider',
-        },
+        { type: 'divider' },
         {
           type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: analysis.slice(0, 3000),
-          },
+          text: { type: 'mrkdwn', text: analysis.slice(0, 3000) },
         },
-        {
-          type: 'divider',
-        },
+        { type: 'divider' },
         {
           type: 'context',
-          elements: [
-            {
-              type: 'mrkdwn',
-              text: `${new Date().toLocaleString('ko-KR')} | Claude Sonnet 4`,
-            },
-          ],
+          elements: [{
+            type: 'mrkdwn',
+            text: `${new Date().toLocaleString('ko-KR')} | Claude Sonnet 4`,
+          }],
         },
       ],
     });
 
+    // 긴 메시지 분할 발송
     if (analysis.length > 3000) {
-      await slack.chat.postMessage({
-        channel: process.env.CEO_SLACK_ID,
-        text: analysis.slice(3000),
-      });
+      const remaining = analysis.slice(3000);
+      const chunks = remaining.match(/.{1,3000}/g) || [];
+      for (const chunk of chunks) {
+        await slack.chat.postMessage({
+          channel: process.env.CEO_SLACK_ID,
+          text: chunk,
+        });
+      }
     }
 
     console.log('CEO에게 DM 발송 완료');
@@ -1049,74 +1141,83 @@ module.exports = async (req, res) => {
   const days = Math.min(parseInt(req.query?.days || req.body?.days) || 1, 30);
 
   console.log('='.repeat(50));
-  console.log(`📋 CEO 일일 브리핑 생성 시작`);
+  console.log(`📊 CEO 대시보드 생성 시작`);
   console.log(`📆 분석 기간: ${days}일`);
-  console.log(`📅 현재 시각 (UTC): ${new Date().toISOString()}`);
   console.log(`📅 현재 시각 (KST): ${getKSTDate().toISOString()}`);
   console.log('='.repeat(50));
 
   try {
-    // 0. 매출 데이터 수집
+    // 0. 캘린더 데이터 수집
+    console.log('\n📅 캘린더 데이터 수집 중...');
+    const calendarData = await getCalendarEvents(days, 7);
+    if (calendarData) {
+      console.log(`✅ 캘린더: 오늘 ${calendarData.today.length}건, 예정 ${calendarData.upcoming.length}건`);
+    }
+
+    // 1. 매출 데이터 수집
     console.log('\n💰 매출 데이터 수집 중...');
     const revenueData = await getRevenueData(Math.max(days, 7));
     if (revenueData) {
       console.log(`✅ 매출 데이터: ${revenueData.data.length}일치`);
-      console.log(`   어제 데이터: ${revenueData.hasYesterdayData ? '있음' : '없음'}`);
+      console.log(`   월 목표 대비: ${revenueData.monthlyAnalysis.progress}%`);
     }
 
-    // 1. Slack 채널 메시지 수집
+    // 2. Slack 메시지 수집
     console.log('\n📱 Slack 메시지 수집 중...');
     const { messages: slackMessages, userMap } = await getSlackMessages(days);
     const slackThreadCount = slackMessages.filter(m => m.isThread).length;
     console.log(`✅ Slack: ${slackMessages.length}개 (스레드 ${slackThreadCount}개)`);
 
-    // 2. CEO DM 수집
+    // 3. CEO DM 수집
     console.log('\n💬 CEO DM 수집 중...');
     const ceoDMs = await getCEODirectMessages(userMap, days);
     const dmThreadCount = ceoDMs.filter(m => m.isThread).length;
     console.log(`✅ CEO DM: ${ceoDMs.length}개 (스레드 ${dmThreadCount}개)`);
 
-    // 3. Notion 사용자
+    // 4. Notion 데이터 수집
     console.log('\n👥 Notion 사용자 목록...');
     const notionUsers = await getNotionUsers();
 
-    // 4. Notion 페이지
     console.log('\n📝 Notion 페이지 수집 중...');
     const notionPages = await getRecentNotionPages(days);
     console.log(`✅ Notion 페이지: ${notionPages.length}개`);
 
-    // 5. Notion 데이터베이스
     console.log('\n📊 Notion 데이터베이스 수집 중...');
     const notionDatabases = await getNotionDatabases(days);
     console.log(`✅ Notion DB: ${notionDatabases.length}개`);
 
-    // 6. Claude 분석
+    // 5. Claude 분석
     console.log('\n🤖 Claude 분석 중...');
-    const analysis = await analyzeWithClaude(slackMessages, ceoDMs, {
-      pages: notionPages,
-      databases: notionDatabases,
-      users: notionUsers,
-    }, revenueData, days);
+    const analysis = await analyzeWithClaude(
+      slackMessages, 
+      ceoDMs, 
+      { pages: notionPages, databases: notionDatabases, users: notionUsers },
+      revenueData,
+      calendarData,
+      days
+    );
     console.log('✅ 분석 완료');
 
-    // 7. CEO에게 발송
+    // 6. CEO에게 발송
     console.log('\n📤 CEO에게 DM 발송 중...');
     await sendDMToCEO(analysis, {
       slackCount: slackMessages.length,
       dmCount: ceoDMs.length,
       notionPages: notionPages.length,
       notionDbs: notionDatabases.length,
-      days: days,
+      days,
       revenueDataAvailable: !!revenueData,
       hasYesterdayData: revenueData?.hasYesterdayData || false,
       threadCount: slackThreadCount + dmThreadCount,
+      calendarAvailable: !!calendarData,
+      todayMeetings: calendarData?.today.length || 0,
     });
 
     console.log('\n✅ 완료!');
 
     res.status(200).json({
       success: true,
-      days: days,
+      days,
       stats: {
         slackMessages: slackMessages.length,
         slackThreads: slackThreadCount,
@@ -1124,11 +1225,17 @@ module.exports = async (req, res) => {
         dmThreads: dmThreadCount,
         notionPages: notionPages.length,
         notionDatabases: notionDatabases.length,
+        calendar: calendarData ? {
+          today: calendarData.today.length,
+          upcoming: calendarData.upcoming.length,
+          meetingHours: calendarData.stats.meetingHoursThisWeek,
+        } : null,
         revenueData: revenueData ? {
           days: revenueData.data.length,
           latestTotal: revenueData.stats?.latestTotal,
           latestDate: revenueData.stats?.latestDate,
           hasYesterdayData: revenueData.hasYesterdayData,
+          monthlyProgress: revenueData.monthlyAnalysis?.progress,
         } : null,
       },
       timestamp: new Date().toISOString(),
