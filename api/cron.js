@@ -126,6 +126,37 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
       const start = new Date(event.start?.dateTime || event.start?.date);
       const end = new Date(event.end?.dateTime || event.end?.date);
       
+      // Google Calendar 색상 ID 매핑
+      // 1: 라벤더, 2: 세이지, 3: 포도, 4: 플라밍고, 5: 바나나
+      // 6: 귤, 7: 공작, 8: 흑연, 9: 블루베리, 10: 바질, 11: 토마토
+      const colorMap = {
+        '1': '라벤더',
+        '2': '세이지(초록)',
+        '3': '포도(보라)',
+        '4': '플라밍고(분홍)',
+        '5': '바나나(노랑)',
+        '6': '귤(주황)',
+        '7': '공작(청록)',
+        '8': '흑연(회색)',
+        '9': '블루베리(파랑)',
+        '10': '바질(초록)',
+        '11': '토마토(빨강)',
+      };
+      
+      // Tim 캘린더 색상 분류
+      // 주황 = 실제 미팅
+      // 보라 = 프로덕트 관련 업무 (기획/리서치)
+      // 파랑/회색 = 개인 업무 (운영/HR/경영지원/연락)
+      // 초록 = 자기계발
+      // 노랑/분홍 = 노는 시간
+      const colorId = event.colorId || '0';
+      let eventType = 'other';
+      if (colorId === '6') eventType = 'meeting';           // 주황 = 실제 미팅
+      else if (colorId === '3') eventType = 'product';      // 보라 = 프로덕트
+      else if (['8', '9'].includes(colorId)) eventType = 'ops';  // 회색/파랑 = 개인업무(운영)
+      else if (['2', '10'].includes(colorId)) eventType = 'growth';  // 초록 = 자기계발
+      else if (['4', '5'].includes(colorId)) eventType = 'personal'; // 분홍/노랑 = 노는시간
+      
       const eventData = {
         id: event.id,
         title: event.summary || '제목 없음',
@@ -144,6 +175,9 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
         })),
         isAllDay: !event.start?.dateTime,
         meetLink: event.hangoutLink || '',
+        colorId: colorId,
+        colorName: colorMap[colorId] || '기본',
+        eventType: eventType,  // meeting, work, personal, other
       };
 
       if (start < todayStart) {
@@ -161,13 +195,37 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
       return daysDiff <= 7;
     });
 
-    const meetingMinutes = thisWeekEvents
+    // 실제 미팅 시간만 계산 (주황색 = meeting)
+    const actualMeetingMinutes = thisWeekEvents
+      .filter(e => !e.isAllDay && e.eventType === 'meeting')
+      .reduce((sum, e) => sum + e.duration, 0);
+    
+    const totalScheduledMinutes = thisWeekEvents
       .filter(e => !e.isAllDay)
       .reduce((sum, e) => sum + e.duration, 0);
 
-    const meetingHours = Math.round(meetingMinutes / 60 * 10) / 10;
+    const actualMeetingHours = Math.round(actualMeetingMinutes / 60 * 10) / 10;
+    const totalScheduledHours = Math.round(totalScheduledMinutes / 60 * 10) / 10;
     
-    // 카테고리별 분류 (제목 키워드 기반)
+    // 색상 기반 카테고리 (eventType 사용)
+    const byEventType = {
+      '실제미팅(주황)': thisWeekEvents.filter(e => e.eventType === 'meeting').length,
+      '프로덕트(보라)': thisWeekEvents.filter(e => e.eventType === 'product').length,
+      '운영업무(파랑/회색)': thisWeekEvents.filter(e => e.eventType === 'ops').length,
+      '자기계발(초록)': thisWeekEvents.filter(e => e.eventType === 'growth').length,
+      '여가(노랑/분홍)': thisWeekEvents.filter(e => e.eventType === 'personal').length,
+    };
+    
+    // 시간 계산 (분 → 시간)
+    const hoursByType = {
+      meeting: Math.round(thisWeekEvents.filter(e => e.eventType === 'meeting' && !e.isAllDay).reduce((s, e) => s + e.duration, 0) / 60 * 10) / 10,
+      product: Math.round(thisWeekEvents.filter(e => e.eventType === 'product' && !e.isAllDay).reduce((s, e) => s + e.duration, 0) / 60 * 10) / 10,
+      ops: Math.round(thisWeekEvents.filter(e => e.eventType === 'ops' && !e.isAllDay).reduce((s, e) => s + e.duration, 0) / 60 * 10) / 10,
+      growth: Math.round(thisWeekEvents.filter(e => e.eventType === 'growth' && !e.isAllDay).reduce((s, e) => s + e.duration, 0) / 60 * 10) / 10,
+      personal: Math.round(thisWeekEvents.filter(e => e.eventType === 'personal' && !e.isAllDay).reduce((s, e) => s + e.duration, 0) / 60 * 10) / 10,
+    };
+    
+    // 키워드 기반 카테고리 (기존)
     const categories = {
       '1:1': thisWeekEvents.filter(e => /1:1|1on1|면담/.test(e.title)).length,
       '팀미팅': thisWeekEvents.filter(e => /팀|스탠드업|싱크|sync|standup/.test(e.title.toLowerCase())).length,
@@ -179,6 +237,7 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
     const freeSlots = calculateFreeSlots(todayEvents, upcomingEvents.slice(0, 20));
 
     console.log(`📅 캘린더: 과거 ${pastEvents.length}개, 오늘 ${todayEvents.length}개, 예정 ${upcomingEvents.length}개`);
+    console.log(`   실제 미팅(주황): ${byEventType['실제미팅(주황)']}건, ${actualMeetingHours}시간`);
 
     return {
       past: pastEvents,
@@ -186,8 +245,11 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
       upcoming: upcomingEvents,
       thisWeek: thisWeekEvents,
       stats: {
-        meetingHoursThisWeek: meetingHours,
-        categories,
+        actualMeetingHours,      // 실제 미팅만 (주황)
+        totalScheduledHours,     // 전체 일정
+        categories,              // 키워드 기반
+        byEventType,             // 색상 기반 (건수)
+        hoursByType,             // 색상 기반 (시간)
         totalEventsThisWeek: thisWeekEvents.length,
       },
       freeSlots,
@@ -912,24 +974,43 @@ ${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}`;
   let calendarSection = '캘린더 데이터 없음';
   if (calendarData) {
     const todayList = calendarData.today.length > 0
-      ? calendarData.today.map(e => `  - ${e.startStr}: ${e.title} (${e.duration}분)${e.attendees.length > 0 ? ` [${e.attendees.map(a => a.name).join(', ')}]` : ''}`).join('\n')
+      ? calendarData.today.map(e => {
+          const typeTag = e.eventType === 'meeting' ? '🟠' :   // 주황 = 미팅
+                         e.eventType === 'product' ? '🟣' :    // 보라 = 프로덕트
+                         e.eventType === 'ops' ? '🔵' :        // 파랑/회색 = 운영
+                         e.eventType === 'growth' ? '🟢' :     // 초록 = 자기계발
+                         e.eventType === 'personal' ? '🟡' :   // 노랑/분홍 = 여가
+                         '⚪';
+          return `  ${typeTag} ${e.startStr}: ${e.title} (${e.duration}분)${e.attendees.length > 0 ? ` [${e.attendees.map(a => a.name).join(', ')}]` : ''}`;
+        }).join('\n')
       : '  (일정 없음)';
     
-    const upcomingList = calendarData.upcoming.slice(0, 10).map(e => 
-      `  - ${e.startStr}: ${e.title}${e.attendees.length > 0 ? ` [${e.attendees.map(a => a.name).join(', ')}]` : ''}`
-    ).join('\n');
+    const upcomingList = calendarData.upcoming.slice(0, 10).map(e => {
+      const typeTag = e.eventType === 'meeting' ? '🟠' :
+                     e.eventType === 'product' ? '🟣' :
+                     e.eventType === 'ops' ? '🔵' :
+                     e.eventType === 'growth' ? '🟢' :
+                     e.eventType === 'personal' ? '🟡' :
+                     '⚪';
+      return `  ${typeTag} ${e.startStr}: ${e.title}${e.attendees.length > 0 ? ` [${e.attendees.map(a => a.name).join(', ')}]` : ''}`;
+    }).join('\n');
 
     const freeSlotsList = calendarData.freeSlots.length > 0
       ? calendarData.freeSlots.map(s => `  - ${s.date} ${s.start}부터 ${s.duration}`).join('\n')
       : '  (빈 시간 없음)';
 
-    calendarSection = `[오늘 일정]
+    const hbt = calendarData.stats.hoursByType;
+    
+    calendarSection = `[오늘 일정] (🟠미팅 🟣프로덕트 🔵운영 🟢자기계발 🟡여가)
 ${todayList}
 
-[이번 주 미팅 시간: ${calendarData.stats.meetingHoursThisWeek}시간]
-- 1:1: ${calendarData.stats.categories['1:1']}건
-- 팀미팅: ${calendarData.stats.categories['팀미팅']}건
-- 외부미팅: ${calendarData.stats.categories['외부미팅']}건
+[이번 주 시간 배분]
+- 🟠 실제 미팅: ${hbt.meeting}시간
+- 🟣 프로덕트(기획/리서치): ${hbt.product}시간
+- 🔵 운영업무(HR/경영지원): ${hbt.ops}시간
+- 🟢 자기계발: ${hbt.growth}시간
+- 🟡 여가: ${hbt.personal}시간
+- 전체: ${calendarData.stats.totalScheduledHours}시간
 
 [향후 주요 일정]
 ${upcomingList}
