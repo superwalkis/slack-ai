@@ -189,6 +189,11 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
         colorId: colorId,
         colorName: colorMap[colorId] || '기본',
         eventType: eventType,
+        // 외부/내부 미팅 구분
+        isExternal: !!(event.location || event.hangoutLink || 
+                      (event.description && /zoom|meet\.google|teams/i.test(event.description))),
+        meetingType: event.location ? '외부' : 
+                    (event.hangoutLink || (event.description && /zoom|meet\.google|teams/i.test(event.description))) ? '외부-화상' : '내부',
       };
 
       if (start < todayStart) {
@@ -1287,7 +1292,7 @@ async function getPageInfoLite(page, includeContent = false) {
   }
 }
 
-// [NEW] 라이트 버전 - 하위 페이지 탐색 (컨텐츠 없이)
+// [NEW] 라이트 버전 - 하위 페이지 탐색 (since 필터 제거, 컨텐츠 일부 포함)
 async function getChildPagesLite(parentId, maxDepth = 2, currentDepth = 0, since = null, seenIds = new Set()) {
   if (currentDepth >= maxDepth) {
     return [];
@@ -1298,35 +1303,67 @@ async function getChildPagesLite(parentId, maxDepth = 2, currentDepth = 0, since
   try {
     const blocks = await notion.blocks.children.list({
       block_id: parentId,
-      page_size: 50, // 50개로 제한
+      page_size: 50,
     });
     
     for (const block of blocks.results) {
       if (block.type === 'child_page') {
         notionStats.childPagesFound++;
         
-        const isRecent = !since || new Date(block.last_edited_time) >= new Date(since);
-        
-        if (isRecent && !seenIds.has(block.id)) {
+        // since 필터 완전 제거 - 모든 하위 페이지 포함
+        if (!seenIds.has(block.id)) {
+          seenIds.add(block.id);
+          
+          // 상위 3개 페이지는 컨텐츠도 읽기
+          let content = '';
+          if (allPages.length < 3) {
+            try {
+              content = await getBlockContentRecursive(block.id, 2);
+            } catch (e) {
+              // 실패해도 제목은 포함
+            }
+          }
+          
           allPages.push({
             id: block.id,
             title: block.child_page?.title || '제목 없음',
-            content: '', // 컨텐츠 없이
+            content: content.slice(0, 600),
             lastEditedTime: block.last_edited_time,
             depth: currentDepth + 1,
             parentId: parentId,
-            hasFullContent: false,
+            hasFullContent: content.length > 0,
           });
         }
         
-        // depth 2까지만 재귀
+        // depth 2까지 재귀
         if (currentDepth + 1 < maxDepth) {
           const childPages = await getChildPagesLite(block.id, maxDepth, currentDepth + 1, since, seenIds);
           allPages.push(...childPages);
         }
       }
       
-      // 하위 데이터베이스는 스킵 (시간 절약)
+      // 하위 데이터베이스도 수집 (최근 아이템 3개)
+      if (block.type === 'child_database' && allPages.length < 15) {
+        const dbTitle = block.child_database?.title || 'DB';
+        log('DEBUG', 'Notion', `하위 DB 발견: ${dbTitle} (depth ${currentDepth + 1})`);
+        
+        try {
+          const dbItems = await getDatabaseItemsLite(block.id, null, 3);
+          for (const item of dbItems) {
+            if (!seenIds.has(item.id)) {
+              seenIds.add(item.id);
+              allPages.push({
+                ...item,
+                depth: currentDepth + 1,
+                parentId: parentId,
+                databaseName: dbTitle,
+              });
+            }
+          }
+        } catch (e) {
+          // DB 접근 실패 무시
+        }
+      }
     }
     
   } catch (error) {
@@ -1499,6 +1536,10 @@ ${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}`;
   // 캘린더 데이터 포맷팅
   let calendarSection = '캘린더 데이터 없음';
   if (calendarData && calendarData.today) {
+    // 외부/내부 미팅 카운트
+    const externalCount = calendarData.today.filter(e => e.isExternal).length;
+    const internalCount = calendarData.today.filter(e => !e.isExternal && !e.isAllDay).length;
+    
     const todayList = calendarData.today.length > 0
       ? calendarData.today.map(e => {
           const typeTag = e.eventType === 'meeting' ? '🟠' :
@@ -1506,7 +1547,10 @@ ${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}`;
                          e.eventType === 'ops' ? '🔵' :
                          e.eventType === 'growth' ? '🟢' :
                          e.eventType === 'personal' ? '🟡' : '⚪';
-          return `  ${typeTag} ${e.startStr}: ${e.title} (${e.duration}분)${e.attendees.length > 0 ? ` [${e.attendees.map(a => a.name).join(', ')}]` : ''}`;
+          const meetingTypeTag = e.meetingType ? `[${e.meetingType}]` : '';
+          const locationInfo = e.location ? ` 📍${e.location}` : '';
+          const meetLinkInfo = e.meetLink ? ' 🔗화상' : '';
+          return `  ${typeTag} ${e.startStr}: ${e.title} ${meetingTypeTag} (${e.duration}분)${locationInfo}${meetLinkInfo}${e.attendees.length > 0 ? ` [${e.attendees.map(a => a.name).join(', ')}]` : ''}`;
         }).join('\n')
       : '  (일정 없음)';
     
@@ -1516,7 +1560,8 @@ ${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}`;
                      e.eventType === 'ops' ? '🔵' :
                      e.eventType === 'growth' ? '🟢' :
                      e.eventType === 'personal' ? '🟡' : '⚪';
-      return `  ${typeTag} ${e.startStr}: ${e.title}${e.attendees.length > 0 ? ` [${e.attendees.map(a => a.name).join(', ')}]` : ''}`;
+      const meetingTypeTag = e.meetingType ? `[${e.meetingType}]` : '';
+      return `  ${typeTag} ${e.startStr}: ${e.title} ${meetingTypeTag}${e.attendees.length > 0 ? ` [${e.attendees.map(a => a.name).join(', ')}]` : ''}`;
     }).join('\n');
 
     const freeSlotsList = calendarData.freeSlots.length > 0
@@ -1526,6 +1571,7 @@ ${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}`;
     const hbt = calendarData.stats?.hoursByType || {};
     
     calendarSection = `[오늘 일정] (🟠미팅 🟣프로덕트 🔵운영 🟢자기계발 🟡여가)
+총 ${calendarData.today.length}건 (외부 ${externalCount}건 / 내부 ${internalCount}건)
 ${todayList}
 
 [이번 주 시간 배분]
@@ -1547,11 +1593,18 @@ ${freeSlotsList}`;
   const prompt = `당신은 월 2~3억 매출의 Web3 스타트업 CEO의 Chief of Staff입니다.
 CEO가 아침에 읽고 바로 의사결정하고 행동할 수 있는 브리핑을 작성합니다.
 
+[CEO 컨텍스트]
+- 최근 구조조정 완료 (23명 → 17명), 조직 안정화 중
+- 교보생명 PoC 데드라인 (1월 13일) 중요
+- 2026년 목표: MAU 300K, 월 광고매출 3-4억, Q4 흑자전환
+- 성향: 직접적/합리적 피드백 선호, 데이터 기반 의사결정
+- 비기술 창업자로 AI 자동화에 적극적
+
 [핵심 원칙]
 1. 목표 대비 현재 위치를 명확히 - 숫자로 Gap 표시
 2. 모든 이슈에 오너십(누가)과 데드라인(언제까지) 명시
 3. 의사결정이 필요하면 옵션과 추천안 제시
-4. CEO 시간 배분 가이드 제공
+4. CEO 시간 배분 가이드 제공 (구체적 시간/퍼센트)
 5. 스레드 맥락 파악 - 결론 난 건 [해결됨] 표시
 6. 캘린더 데이터가 있으면 반드시 오늘 일정과 미팅 브리프에 포함할 것
 7. Notion 페이지의 깊이(depth)와 출처(source)를 참고하여 중요도 판단
@@ -1587,24 +1640,34 @@ ${notionPagesSection}
 
 # CEO 대시보드
 
+> 💡 [한 줄 코칭: CEO의 현재 상황(구조조정 직후, 연말, 2026 준비)을 고려한 실질적 조언 한 문장]
+
 ## 1) 핵심 지표 현황
 매출:
 - 어제: [금액] | 전일대비: [%] | 7일평균대비: [%]
 - 월 목표 대비: MTD [금액] ([%])
 - 목표 달성 전망: [달성 가능/⚠ 미달 예상 - 근거]
 
-오늘 일정: [N]건, 미팅 시간 [N]시간
+오늘 일정: [N]건 (외부 [N]건 / 내부 [N]건)
 집중 가능 시간: [시간대]
 
 ## 2) 의사결정 필요 (우선순위순)
 
-### [높음] 이슈명
+### 🔴 이슈명
 배경: 1줄
 옵션:
   A) [선택지1] → 예상 결과
   B) [선택지2] → 예상 결과
 추천: [A/B] - [근거 1줄]
 담당: [이름] | 결정 기한: [날짜]
+
+### 🟡 이슈명
+(동일 형식)
+
+### 🟢 이슈명
+(동일 형식)
+
+(의사결정 필요 없으면 "오늘 결정할 사항 없음")
 
 ## 3) 실행 추적
 
@@ -1619,11 +1682,16 @@ ${notionPagesSection}
 
 ## 4) 금주 CEO 시간 배분 권장
 
-1. [주제1] ([%]) - [이유]
-2. [주제2] ([%]) - [이유]
-3. [주제3] ([%]) - [이유]
+| 영역 | 배분 | 시간 | 구체적 행동 |
+|------|------|------|------------|
+| [영역1] | [N]% | [N]시간 | [무엇을 어떻게] |
+| [영역2] | [N]% | [N]시간 | [무엇을 어떻게] |
+| [영역3] | [N]% | [N]시간 | [무엇을 어떻게] |
+| [영역4] | [N]% | [N]시간 | [무엇을 어떻게] |
 
-이번 주 하지 말 것: [에너지 쏟을 필요 없는 것들]
+(주 40시간 기준으로 계산)
+
+이번 주 하지 말 것: [에너지 쏟을 필요 없는 것들 - 구체적으로]
 
 ## 5) 리스크 모니터링
 
@@ -1633,17 +1701,25 @@ ${notionPagesSection}
 
 ## 6) 오늘의 미팅 브리프
 
-[시간] 미팅명
+[시간] 미팅명 [외부/내부/외부-화상]
+- 참석자: [누구와]
 - 목적/아젠다: 
 - 준비 필요: 
 - 원하는 결과:
+
+[외부/내부 구분 기준]
+- 장소(location)가 있으면 → [외부]
+- Google Meet/Zoom 링크가 있으면 → [외부-화상]
+- 둘 다 없으면 → [내부]
 
 ---
 [주의사항]
 - 숫자는 정확하게, 불확실하면 "⚠ 확인 필요"
 - 담당자/기한 없는 액션 아이템 금지
 - 볼드(**) 사용 금지
-- 이모지는 최소한으로`;
+- 의사결정 우선순위는 반드시 🔴🟡🟢 이모지로 표시
+- 시간 배분은 주 40시간 기준으로 시간까지 계산해서 제공
+- 한 줄 코칭은 CEO의 현재 상황과 컨텍스트를 반영한 실질적 조언으로`;
 
   try {
     const message = await anthropic.messages.create({
