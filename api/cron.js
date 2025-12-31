@@ -1080,8 +1080,11 @@ function extractRelevantProperties(properties) {
   return relevant;
 }
 
-// [NEW] 메인 Notion 수집 함수 (통합)
+// [NEW] 메인 Notion 수집 함수 (통합) - 성능 최적화 버전
 async function getRecentNotionPagesDeep(days = 1) {
+  const startTime = Date.now();
+  const MAX_EXECUTION_TIME = 60000; // 60초 제한 (안전 마진)
+  
   // 통계 초기화
   Object.assign(notionStats, {
     searchApiPages: 0,
@@ -1097,14 +1100,17 @@ async function getRecentNotionPagesDeep(days = 1) {
   const since = new Date(Date.now() - (86400000 * days)).toISOString();
   const seenIds = new Set();
   
+  // 시간 체크 헬퍼
+  const isTimeUp = () => (Date.now() - startTime) > MAX_EXECUTION_TIME;
+  
   log('INFO', 'Notion', `Notion 수집 시작 (since: ${since})`);
   
-  // 1. 기존 Search API (최상위 레벨)
+  // 1. Search API로 최근 수정된 페이지 가져오기 (제목만, 빠르게)
   try {
     const searchResults = await notion.search({
       filter: { property: 'object', value: 'page' },
       sort: { direction: 'descending', timestamp: 'last_edited_time' },
-      page_size: 100,
+      page_size: 50, // 50개로 제한
     });
     
     const recentFromSearch = searchResults.results.filter(p => p.last_edited_time >= since);
@@ -1112,100 +1118,270 @@ async function getRecentNotionPagesDeep(days = 1) {
     
     log('INFO', 'Notion', `Search API: ${recentFromSearch.length}개 페이지 (최근 ${days}일)`);
     
-    for (const page of recentFromSearch.slice(0, 30)) {
-      if (seenIds.has(page.id)) continue;
-      seenIds.add(page.id);
+    // 상위 20개만 처리, 병렬로 (5개씩 배치)
+    const pagesToProcess = recentFromSearch.slice(0, 20);
+    const batchSize = 5;
+    
+    for (let i = 0; i < pagesToProcess.length && !isTimeUp(); i += batchSize) {
+      const batch = pagesToProcess.slice(i, i + batchSize);
       
-      const pageInfo = await getPageInfoDeepV2(page);
-      if (pageInfo) {
-        pageInfo.source = 'search_api';
-        allPages.push(pageInfo);
-      }
+      const results = await Promise.all(
+        batch.map(async (page) => {
+          if (seenIds.has(page.id)) return null;
+          seenIds.add(page.id);
+          
+          // 상위 10개만 컨텐츠 포함, 나머지는 제목만
+          const includeContent = i < 10;
+          const pageInfo = await getPageInfoLite(page, includeContent);
+          if (pageInfo) {
+            pageInfo.source = 'search_api';
+          }
+          return pageInfo;
+        })
+      );
+      
+      allPages.push(...results.filter(Boolean));
+      log('DEBUG', 'Notion', `Search API 배치 ${i / batchSize + 1} 완료 (${Date.now() - startTime}ms)`);
     }
   } catch (error) {
     log('ERROR', 'Notion', `Search API 실패: ${error.message}`);
   }
   
-  // 2. 지정된 루트 페이지에서 하위 탐색
+  if (isTimeUp()) {
+    log('WARN', 'Notion', '시간 제한 도달 - Search API만으로 완료');
+    return finalizeResults(allPages);
+  }
+  
+  // 2. 루트 페이지에서 하위 탐색 (depth 2로 제한, 빠르게)
   const rootPageIds = getRootPageIds();
   
   if (rootPageIds.length > 0) {
     log('INFO', 'Notion', `루트 페이지 탐색 시작: ${rootPageIds.length}개`);
     
     for (const rootId of rootPageIds) {
+      if (isTimeUp()) {
+        log('WARN', 'Notion', '시간 제한 도달 - 루트 탐색 중단');
+        break;
+      }
+      
       log('DEBUG', 'Notion', `루트 페이지 탐색: ${rootId}`);
       
       try {
-        const childPages = await getChildPagesRecursive(rootId, 4, 0, since);
+        // depth 2로 제한, 컨텐츠 없이 제목만
+        const childPages = await getChildPagesLite(rootId, 2, 0, since, seenIds);
         
         for (const page of childPages) {
-          if (seenIds.has(page.id)) continue;
-          seenIds.add(page.id);
-          
-          page.source = 'recursive_search';
-          allPages.push(page);
+          if (!seenIds.has(page.id)) {
+            seenIds.add(page.id);
+            page.source = 'recursive_search';
+            allPages.push(page);
+          }
         }
         
-        log('DEBUG', 'Notion', `루트 ${rootId}: ${childPages.length}개 하위 페이지`);
+        log('DEBUG', 'Notion', `루트 ${rootId.slice(0, 8)}...: ${childPages.length}개 하위 페이지 (${Date.now() - startTime}ms)`);
       } catch (error) {
-        log('WARN', 'Notion', `루트 ${rootId} 탐색 실패: ${error.message}`);
+        log('WARN', 'Notion', `루트 ${rootId.slice(0, 8)}... 탐색 실패: ${error.message}`);
       }
     }
-  } else {
-    log('INFO', 'Notion', 'NOTION_ROOT_PAGES 미설정 - 하위 탐색 스킵');
   }
   
-  // 3. 데이터베이스 직접 탐색
+  if (isTimeUp()) {
+    log('WARN', 'Notion', '시간 제한 도달 - DB 탐색 스킵');
+    return finalizeResults(allPages);
+  }
+  
+  // 3. 최근 수정된 DB 아이템 (상위 5개 DB만)
   try {
     const dbSearch = await notion.search({
       filter: { property: 'object', value: 'database' },
-      page_size: 30,
+      page_size: 10,
     });
     
-    log('DEBUG', 'Notion', `발견된 데이터베이스: ${dbSearch.results.length}개`);
+    // 최근 수정된 DB만 필터
+    const recentDbs = dbSearch.results
+      .filter(db => db.last_edited_time >= since)
+      .slice(0, 5);
     
-    for (const db of dbSearch.results.slice(0, 10)) {
-      const dbItems = await getDatabaseItemsWithContent(db.id, since);
+    log('DEBUG', 'Notion', `최근 수정된 DB: ${recentDbs.length}개`);
+    
+    for (const db of recentDbs) {
+      if (isTimeUp()) break;
+      
+      const dbItems = await getDatabaseItemsLite(db.id, since, 5); // 5개로 제한
       
       for (const item of dbItems) {
-        if (seenIds.has(item.id)) continue;
-        seenIds.add(item.id);
-        
-        item.source = 'database_query';
-        item.databaseName = db.title?.[0]?.plain_text || 'Unknown DB';
-        allPages.push(item);
+        if (!seenIds.has(item.id)) {
+          seenIds.add(item.id);
+          item.source = 'database_query';
+          item.databaseName = db.title?.[0]?.plain_text || 'Unknown DB';
+          allPages.push(item);
+        }
       }
     }
   } catch (error) {
     log('WARN', 'Notion', `데이터베이스 탐색 실패: ${error.message}`);
   }
   
-  // 중복 제거 및 정렬
-  const uniquePages = Array.from(
-    new Map(allPages.map(p => [p.id, p])).values()
-  );
+  return finalizeResults(allPages);
   
-  uniquePages.sort((a, b) => new Date(b.lastEditedTime) - new Date(a.lastEditedTime));
-  
-  // 수집 통계 로깅
-  log('INFO', 'Notion', '=== Notion 수집 통계 ===');
-  log('INFO', 'Notion', `Search API 페이지: ${notionStats.searchApiPages}개`);
-  log('INFO', 'Notion', `하위 페이지 발견: ${notionStats.childPagesFound}개`);
-  log('INFO', 'Notion', `DB 아이템 (컨텐츠 포함): ${notionStats.dbItemsWithContent}개`);
-  log('INFO', 'Notion', `총 블록 읽음: ${notionStats.blocksRead}개`);
-  log('INFO', 'Notion', `댓글 수집: ${notionStats.commentsRead}개`);
-  log('INFO', 'Notion', `최대 깊이 도달: ${notionStats.maxDepthReached}회`);
-  log('INFO', 'Notion', `최종 페이지 수: ${uniquePages.length}개`);
-  
-  if (notionStats.errors.length > 0) {
-    log('WARN', 'Notion', `오류 ${notionStats.errors.length}건:`);
-    notionStats.errors.slice(0, 5).forEach(e => log('WARN', 'Notion', `  - ${e}`));
+  // 결과 정리 헬퍼
+  function finalizeResults(pages) {
+    const uniquePages = Array.from(
+      new Map(pages.map(p => [p.id, p])).values()
+    );
+    
+    uniquePages.sort((a, b) => new Date(b.lastEditedTime) - new Date(a.lastEditedTime));
+    
+    const elapsed = Date.now() - startTime;
+    
+    // 수집 통계 로깅
+    log('INFO', 'Notion', '=== Notion 수집 통계 ===');
+    log('INFO', 'Notion', `소요 시간: ${elapsed}ms`);
+    log('INFO', 'Notion', `Search API 페이지: ${notionStats.searchApiPages}개`);
+    log('INFO', 'Notion', `하위 페이지 발견: ${notionStats.childPagesFound}개`);
+    log('INFO', 'Notion', `DB 아이템: ${notionStats.dbItemsWithContent}개`);
+    log('INFO', 'Notion', `총 블록 읽음: ${notionStats.blocksRead}개`);
+    log('INFO', 'Notion', `최종 페이지 수: ${uniquePages.length}개`);
+    
+    if (notionStats.errors.length > 0) {
+      log('WARN', 'Notion', `오류 ${notionStats.errors.length}건`);
+    }
+    
+    return {
+      pages: uniquePages.slice(0, 40),
+      stats: { ...notionStats },
+    };
+  }
+}
+
+// [NEW] 라이트 버전 - 페이지 정보 (컨텐츠 선택적)
+async function getPageInfoLite(page, includeContent = false) {
+  try {
+    let title = '제목 없음';
+    if (page.properties) {
+      const titleProp = Object.values(page.properties).find(prop => prop.type === 'title');
+      if (titleProp?.title?.[0]) title = titleProp.title[0].plain_text;
+    }
+    
+    if (page.type === 'child_page' && page.child_page?.title) {
+      title = page.child_page.title;
+    }
+
+    let content = '';
+    if (includeContent) {
+      content = await getBlockContentRecursive(page.id, 2); // depth 2로 제한
+    }
+
+    return {
+      id: page.id,
+      title,
+      content: content.slice(0, 1000),
+      lastEditedTime: page.last_edited_time,
+      lastEditedBy: page.last_edited_by?.id || 'unknown',
+      url: page.url || `https://notion.so/${page.id.replace(/-/g, '')}`,
+      hasFullContent: includeContent,
+    };
+  } catch (error) {
+    notionStats.errors.push(`페이지 ${page.id}: ${error.message}`);
+    return null;
+  }
+}
+
+// [NEW] 라이트 버전 - 하위 페이지 탐색 (컨텐츠 없이)
+async function getChildPagesLite(parentId, maxDepth = 2, currentDepth = 0, since = null, seenIds = new Set()) {
+  if (currentDepth >= maxDepth) {
+    return [];
   }
   
-  return {
-    pages: uniquePages.slice(0, 50),
-    stats: { ...notionStats },
-  };
+  const allPages = [];
+  
+  try {
+    const blocks = await notion.blocks.children.list({
+      block_id: parentId,
+      page_size: 50, // 50개로 제한
+    });
+    
+    for (const block of blocks.results) {
+      if (block.type === 'child_page') {
+        notionStats.childPagesFound++;
+        
+        const isRecent = !since || new Date(block.last_edited_time) >= new Date(since);
+        
+        if (isRecent && !seenIds.has(block.id)) {
+          allPages.push({
+            id: block.id,
+            title: block.child_page?.title || '제목 없음',
+            content: '', // 컨텐츠 없이
+            lastEditedTime: block.last_edited_time,
+            depth: currentDepth + 1,
+            parentId: parentId,
+            hasFullContent: false,
+          });
+        }
+        
+        // depth 2까지만 재귀
+        if (currentDepth + 1 < maxDepth) {
+          const childPages = await getChildPagesLite(block.id, maxDepth, currentDepth + 1, since, seenIds);
+          allPages.push(...childPages);
+        }
+      }
+      
+      // 하위 데이터베이스는 스킵 (시간 절약)
+    }
+    
+  } catch (error) {
+    notionStats.errors.push(`하위 탐색 ${parentId}: ${error.message}`);
+  }
+  
+  return allPages;
+}
+
+// [NEW] 라이트 버전 - DB 아이템 (제한된 수, 컨텐츠 없이)
+async function getDatabaseItemsLite(databaseId, since = null, limit = 5) {
+  const items = [];
+  
+  try {
+    const queryOptions = {
+      database_id: databaseId,
+      page_size: limit,
+      sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
+    };
+    
+    if (since) {
+      queryOptions.filter = {
+        timestamp: 'last_edited_time',
+        last_edited_time: { on_or_after: since },
+      };
+    }
+    
+    const result = await notion.databases.query(queryOptions);
+    
+    for (const item of result.results) {
+      notionStats.dbItemsWithContent++;
+      
+      const titleProp = Object.values(item.properties).find(p => p.type === 'title');
+      const title = titleProp?.title?.[0]?.plain_text || '제목 없음';
+      
+      const properties = extractRelevantProperties(item.properties);
+      
+      items.push({
+        id: item.id,
+        title,
+        content: '', // 컨텐츠 없이
+        lastEditedTime: item.last_edited_time,
+        properties,
+        isDbItem: true,
+        hasFullContent: false,
+      });
+    }
+    
+    log('DEBUG', 'Notion', `DB ${databaseId.slice(0, 8)}...: ${items.length}개 아이템`);
+    
+  } catch (error) {
+    notionStats.errors.push(`DB 아이템 ${databaseId}: ${error.message}`);
+  }
+  
+  return items;
 }
 
 // Notion 사용자 목록
