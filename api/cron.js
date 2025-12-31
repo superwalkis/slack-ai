@@ -18,6 +18,35 @@ const notion = new Client({
 });
 
 // ============================================
+// 로깅 유틸리티 (상세 디버깅용)
+// ============================================
+const LOG_LEVELS = {
+  DEBUG: 0,
+  INFO: 1,
+  WARN: 2,
+  ERROR: 3,
+};
+
+const currentLogLevel = LOG_LEVELS.DEBUG; // 디버깅 시 DEBUG, 프로덕션 시 INFO
+
+function log(level, category, message, data = null) {
+  if (LOG_LEVELS[level] >= currentLogLevel) {
+    const timestamp = new Date().toISOString();
+    const prefix = {
+      DEBUG: '🔍',
+      INFO: '📌',
+      WARN: '⚠️',
+      ERROR: '❌',
+    }[level];
+    
+    console.log(`${prefix} [${timestamp}] [${category}] ${message}`);
+    if (data && level === 'DEBUG') {
+      console.log(JSON.stringify(data, null, 2).slice(0, 500));
+    }
+  }
+}
+
+// ============================================
 // 날짜 유틸리티 함수들
 // ============================================
 function getKSTDate(date = new Date()) {
@@ -68,21 +97,20 @@ function parseNumber(str) {
 }
 
 // ============================================
-// Google Calendar 일정 수집 (NEW)
+// Google Calendar 일정 수집
 // ============================================
 async function getCalendarEvents(daysBack = 1, daysForward = 7) {
   try {
     const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '{}');
     
     if (!credentials.client_email) {
-      console.log('Google 서비스 계정 미설정 - 캘린더 스킵');
+      log('INFO', 'Calendar', 'Google 서비스 계정 미설정 - 캘린더 스킵');
       return null;
     }
 
-    // CEO 이메일 (환경변수로 설정 필요)
     const ceoEmail = process.env.CEO_GOOGLE_EMAIL;
     if (!ceoEmail) {
-      console.log('CEO_GOOGLE_EMAIL 미설정 - 캘린더 스킵');
+      log('INFO', 'Calendar', 'CEO_GOOGLE_EMAIL 미설정 - 캘린더 스킵');
       return null;
     }
 
@@ -91,7 +119,6 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
       scopes: ['https://www.googleapis.com/auth/calendar.readonly'],
     });
 
-    // 도메인 전체 위임 사용 - 서비스 계정이 CEO 대신 행동
     const authClient = await auth.getClient();
     authClient.subject = ceoEmail;
 
@@ -102,7 +129,7 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
     const timeMax = new Date(now.getTime() + (daysForward * 24 * 60 * 60 * 1000));
 
     const response = await calendar.events.list({
-      calendarId: ceoEmail, // 또는 'primary'
+      calendarId: ceoEmail,
       timeMin: timeMin.toISOString(),
       timeMax: timeMax.toISOString(),
       singleEvents: true,
@@ -112,54 +139,34 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
 
     const events = response.data.items || [];
     
-    // 이벤트 분류 (한국 시간 기준)
     const pastEvents = [];
     const todayEvents = [];
     const upcomingEvents = [];
     
-    // 한국 시간 기준 오늘 시작/끝
     const kstNow = new Date(now.getTime() + (9 * 60 * 60 * 1000));
     const todayStart = new Date(kstNow);
-    todayStart.setUTCHours(0 - 9, 0, 0, 0); // KST 00:00 = UTC 전날 15:00
+    todayStart.setUTCHours(0 - 9, 0, 0, 0);
     const todayEnd = new Date(kstNow);
-    todayEnd.setUTCHours(23 - 9, 59, 59, 999); // KST 23:59 = UTC 14:59
-    
-    console.log(`📅 오늘 범위 (KST): ${todayStart.toISOString()} ~ ${todayEnd.toISOString()}`);
+    todayEnd.setUTCHours(23 - 9, 59, 59, 999);
+
+    const colorMap = {
+      '1': '라벤더', '2': '세이지(초록)', '3': '포도(보라)',
+      '4': '플라밍고(분홍)', '5': '바나나(노랑)', '6': '귤(주황)',
+      '7': '공작(청록)', '8': '흑연(회색)', '9': '블루베리(파랑)',
+      '10': '바질(초록)', '11': '토마토(빨강)',
+    };
 
     for (const event of events) {
       const start = new Date(event.start?.dateTime || event.start?.date);
       const end = new Date(event.end?.dateTime || event.end?.date);
       
-      // Google Calendar 색상 ID 매핑
-      // 1: 라벤더, 2: 세이지, 3: 포도, 4: 플라밍고, 5: 바나나
-      // 6: 귤, 7: 공작, 8: 흑연, 9: 블루베리, 10: 바질, 11: 토마토
-      const colorMap = {
-        '1': '라벤더',
-        '2': '세이지(초록)',
-        '3': '포도(보라)',
-        '4': '플라밍고(분홍)',
-        '5': '바나나(노랑)',
-        '6': '귤(주황)',
-        '7': '공작(청록)',
-        '8': '흑연(회색)',
-        '9': '블루베리(파랑)',
-        '10': '바질(초록)',
-        '11': '토마토(빨강)',
-      };
-      
-      // Tim 캘린더 색상 분류
-      // 주황 = 실제 미팅
-      // 보라 = 프로덕트 관련 업무 (기획/리서치)
-      // 파랑/회색 = 개인 업무 (운영/HR/경영지원/연락)
-      // 초록 = 자기계발
-      // 노랑/분홍 = 노는 시간
       const colorId = event.colorId || '0';
       let eventType = 'other';
-      if (colorId === '6') eventType = 'meeting';           // 주황 = 실제 미팅
-      else if (colorId === '3') eventType = 'product';      // 보라 = 프로덕트
-      else if (['8', '9'].includes(colorId)) eventType = 'ops';  // 회색/파랑 = 개인업무(운영)
-      else if (['2', '10'].includes(colorId)) eventType = 'growth';  // 초록 = 자기계발
-      else if (['4', '5'].includes(colorId)) eventType = 'personal'; // 분홍/노랑 = 노는시간
+      if (colorId === '6') eventType = 'meeting';
+      else if (colorId === '3') eventType = 'product';
+      else if (['8', '9'].includes(colorId)) eventType = 'ops';
+      else if (['2', '10'].includes(colorId)) eventType = 'growth';
+      else if (['4', '5'].includes(colorId)) eventType = 'personal';
       
       const eventData = {
         id: event.id,
@@ -169,7 +176,7 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
         startStr: event.start?.dateTime 
           ? start.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })
           : formatDateString(start),
-        duration: Math.round((end - start) / (1000 * 60)), // 분 단위
+        duration: Math.round((end - start) / (1000 * 60)),
         location: event.location || '',
         description: event.description || '',
         attendees: (event.attendees || []).map(a => ({
@@ -181,7 +188,7 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
         meetLink: event.hangoutLink || '',
         colorId: colorId,
         colorName: colorMap[colorId] || '기본',
-        eventType: eventType,  // meeting, work, personal, other
+        eventType: eventType,
       };
 
       if (start < todayStart) {
@@ -193,13 +200,11 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
       }
     }
 
-    // 이번 주 시간 분석 (한국 시간 기준)
     const thisWeekEvents = [...todayEvents, ...upcomingEvents].filter(e => {
       const daysDiff = (e.start - kstNow) / (1000 * 60 * 60 * 24);
       return daysDiff <= 7;
     });
 
-    // 실제 미팅 시간만 계산 (주황색 = meeting)
     const actualMeetingMinutes = thisWeekEvents
       .filter(e => !e.isAllDay && e.eventType === 'meeting')
       .reduce((sum, e) => sum + e.duration, 0);
@@ -208,19 +213,6 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
       .filter(e => !e.isAllDay)
       .reduce((sum, e) => sum + e.duration, 0);
 
-    const actualMeetingHours = Math.round(actualMeetingMinutes / 60 * 10) / 10;
-    const totalScheduledHours = Math.round(totalScheduledMinutes / 60 * 10) / 10;
-    
-    // 색상 기반 카테고리 (eventType 사용)
-    const byEventType = {
-      '실제미팅(주황)': thisWeekEvents.filter(e => e.eventType === 'meeting').length,
-      '프로덕트(보라)': thisWeekEvents.filter(e => e.eventType === 'product').length,
-      '운영업무(파랑/회색)': thisWeekEvents.filter(e => e.eventType === 'ops').length,
-      '자기계발(초록)': thisWeekEvents.filter(e => e.eventType === 'growth').length,
-      '여가(노랑/분홍)': thisWeekEvents.filter(e => e.eventType === 'personal').length,
-    };
-    
-    // 시간 계산 (분 → 시간)
     const hoursByType = {
       meeting: Math.round(thisWeekEvents.filter(e => e.eventType === 'meeting' && !e.isAllDay).reduce((s, e) => s + e.duration, 0) / 60 * 10) / 10,
       product: Math.round(thisWeekEvents.filter(e => e.eventType === 'product' && !e.isAllDay).reduce((s, e) => s + e.duration, 0) / 60 * 10) / 10,
@@ -228,20 +220,10 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
       growth: Math.round(thisWeekEvents.filter(e => e.eventType === 'growth' && !e.isAllDay).reduce((s, e) => s + e.duration, 0) / 60 * 10) / 10,
       personal: Math.round(thisWeekEvents.filter(e => e.eventType === 'personal' && !e.isAllDay).reduce((s, e) => s + e.duration, 0) / 60 * 10) / 10,
     };
-    
-    // 키워드 기반 카테고리 (기존)
-    const categories = {
-      '1:1': thisWeekEvents.filter(e => /1:1|1on1|면담/.test(e.title)).length,
-      '팀미팅': thisWeekEvents.filter(e => /팀|스탠드업|싱크|sync|standup/.test(e.title.toLowerCase())).length,
-      '외부미팅': thisWeekEvents.filter(e => e.attendees.some(a => !a.email.includes(process.env.COMPANY_DOMAIN || ''))).length,
-      '집중시간': thisWeekEvents.filter(e => /집중|focus|블록|block/.test(e.title.toLowerCase())).length,
-    };
 
-    // 빈 시간대 분석 (오전 9시-오후 6시 기준)
     const freeSlots = calculateFreeSlots(todayEvents, upcomingEvents.slice(0, 20));
 
-    console.log(`📅 캘린더: 과거 ${pastEvents.length}개, 오늘 ${todayEvents.length}개, 예정 ${upcomingEvents.length}개`);
-    console.log(`   실제 미팅(주황): ${byEventType['실제미팅(주황)']}건, ${actualMeetingHours}시간`);
+    log('INFO', 'Calendar', `캘린더: 오늘 ${todayEvents.length}건, 예정 ${upcomingEvents.length}건`);
 
     return {
       past: pastEvents,
@@ -249,27 +231,24 @@ async function getCalendarEvents(daysBack = 1, daysForward = 7) {
       upcoming: upcomingEvents,
       thisWeek: thisWeekEvents,
       stats: {
-        actualMeetingHours,      // 실제 미팅만 (주황)
-        totalScheduledHours,     // 전체 일정
-        categories,              // 키워드 기반
-        byEventType,             // 색상 기반 (건수)
-        hoursByType,             // 색상 기반 (시간)
+        actualMeetingHours: Math.round(actualMeetingMinutes / 60 * 10) / 10,
+        totalScheduledHours: Math.round(totalScheduledMinutes / 60 * 10) / 10,
+        hoursByType,
         totalEventsThisWeek: thisWeekEvents.length,
       },
       freeSlots,
     };
   } catch (error) {
-    console.error('Google Calendar 가져오기 실패:', error.message);
+    log('ERROR', 'Calendar', `Google Calendar 가져오기 실패: ${error.message}`);
     return null;
   }
 }
 
 function calculateFreeSlots(todayEvents, upcomingEvents) {
   const slots = [];
-  const workStart = 9; // 오전 9시
-  const workEnd = 18; // 오후 6시
+  const workStart = 9;
+  const workEnd = 18;
   
-  // 오늘 남은 빈 시간
   const now = new Date();
   const currentHour = now.getHours();
   
@@ -286,7 +265,7 @@ function calculateFreeSlots(todayEvents, upcomingEvents) {
     for (const busy of todayBusy) {
       if (busy.start > freeStart && busy.start < workEnd) {
         const duration = busy.start - freeStart;
-        if (duration >= 1) { // 1시간 이상만
+        if (duration >= 1) {
           slots.push({
             date: '오늘',
             start: `${Math.floor(freeStart)}시`,
@@ -309,7 +288,7 @@ function calculateFreeSlots(todayEvents, upcomingEvents) {
     }
   }
 
-  return slots.slice(0, 5); // 상위 5개만
+  return slots.slice(0, 5);
 }
 
 // ============================================
@@ -320,7 +299,7 @@ async function getRevenueData(days = 7) {
     const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '{}');
     
     if (!credentials.client_email) {
-      console.log('Google 서비스 계정 미설정 - 매출 데이터 스킵');
+      log('INFO', 'Revenue', 'Google 서비스 계정 미설정 - 매출 데이터 스킵');
       return null;
     }
 
@@ -334,8 +313,6 @@ async function getRevenueData(days = 7) {
     
     const kstNow = getKSTDate();
     const sheetName = `${String(kstNow.getFullYear()).slice(2)}.${String(kstNow.getMonth() + 1).padStart(2, '0')}`;
-    
-    console.log(`📊 시트 이름: ${sheetName}`);
     
     const range = `${sheetName}!A:AD`;
     
@@ -351,7 +328,6 @@ async function getRevenueData(days = 7) {
 
     const headers = rows[1] || [];
     
-    // 날짜/합계 컬럼 찾기
     let dateColIndex = -1;
     let totalColIndex = -1;
     
@@ -379,7 +355,6 @@ async function getRevenueData(days = 7) {
       totalColIndex = dateColIndex - 1;
     }
 
-    // 카테고리 컬럼 찾기
     const findCol = (keywords) => {
       return headers.findIndex(h => h && keywords.some(k => String(h).includes(k)));
     };
@@ -450,8 +425,7 @@ async function getRevenueData(days = 7) {
     const latestValidData = revenueData.find(d => d.hasData);
     const validData = revenueData.filter(d => d.hasData);
     
-    // 월간 목표 대비 분석 (환경변수로 설정 가능)
-    const monthlyTarget = parseInt(process.env.MONTHLY_REVENUE_TARGET) || 200_000_000; // 기본 2억
+    const monthlyTarget = parseInt(process.env.MONTHLY_REVENUE_TARGET) || 200_000_000;
     const currentMonth = kstNow.getMonth() + 1;
     const daysInMonth = new Date(kstNow.getFullYear(), currentMonth, 0).getDate();
     const currentDay = kstNow.getDate();
@@ -480,7 +454,6 @@ async function getRevenueData(days = 7) {
       yesterdayStr,
       hasYesterdayData,
       yesterdayTotal: hasYesterdayData ? yesterdayData.total : null,
-      // 목표 대비 분석
       monthlyAnalysis: {
         target: monthlyTarget,
         mtd: mtdRevenue,
@@ -493,7 +466,7 @@ async function getRevenueData(days = 7) {
       },
     };
   } catch (error) {
-    console.error('Google Sheets 매출 데이터 가져오기 실패:', error.message);
+    log('ERROR', 'Revenue', `Google Sheets 매출 데이터 가져오기 실패: ${error.message}`);
     return null;
   }
 }
@@ -518,7 +491,6 @@ function calculateRevenueStats(data) {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5);
 
-  // 7일 트렌드 (상승/하락)
   const trend = totals.length >= 3 
     ? (totals[0] + totals[1]) / 2 > (totals[totals.length - 2] + totals[totals.length - 1]) / 2
       ? 'up'
@@ -543,7 +515,7 @@ function calculateRevenueStats(data) {
 }
 
 // ============================================
-// Slack 메시지 수집 (스레드 강화)
+// Slack 메시지 수집
 // ============================================
 async function getSlackMessages(days = 1) {
   try {
@@ -620,10 +592,10 @@ async function getSlackMessages(days = 1) {
       } catch (err) {}
     }
 
-    console.log(`📧 스레드 댓글 수집: ${threadCount}개`);
+    log('INFO', 'Slack', `스레드 댓글 수집: ${threadCount}개`);
     return { messages: allMessages, userMap };
   } catch (error) {
-    console.error('Slack 메시지 가져오기 실패:', error);
+    log('ERROR', 'Slack', `Slack 메시지 가져오기 실패: ${error.message}`);
     return { messages: [], userMap: {} };
   }
 }
@@ -705,174 +677,538 @@ async function getCEODirectMessages(userMap, days = 1) {
       } catch (err) {}
     }
 
-    console.log(`💬 DM 스레드 댓글 수집: ${threadCount}개`);
+    log('INFO', 'Slack', `DM 스레드 댓글 수집: ${threadCount}개`);
     return allDMs;
   } catch (error) {
-    console.error('CEO DM 가져오기 실패:', error);
+    log('ERROR', 'Slack', `CEO DM 가져오기 실패: ${error.message}`);
     return [];
   }
 }
 
 // ============================================
-// Notion 데이터 수집
+// [NEW] Notion 깊은 탐색 - 핵심 개선 영역
 // ============================================
-async function getRecentNotionPages(days = 1) {
+
+// 수집 통계 (디버깅용)
+const notionStats = {
+  searchApiPages: 0,
+  childPagesFound: 0,
+  dbItemsWithContent: 0,
+  blocksRead: 0,
+  commentsRead: 0,
+  maxDepthReached: 0,
+  errors: [],
+};
+
+// 핵심 루트 페이지 ID (환경변수에서 가져옴)
+function getRootPageIds() {
+  const rootPages = process.env.NOTION_ROOT_PAGES || '';
+  return rootPages.split(',').map(id => id.trim()).filter(Boolean);
+}
+
+// 블록 컨텐츠 추출 (강화 버전)
+function extractTextFromBlockEnhanced(block, depth = 0) {
+  const type = block.type;
+  const content = block[type];
+  const indent = '  '.repeat(depth);
+  
+  let text = '';
+  if (content?.rich_text) {
+    text = content.rich_text.map(t => t.plain_text).join('');
+  }
+  
+  switch (type) {
+    case 'heading_1': return `${indent}# ${text}`;
+    case 'heading_2': return `${indent}## ${text}`;
+    case 'heading_3': return `${indent}### ${text}`;
+    case 'bulleted_list_item': return `${indent}• ${text}`;
+    case 'numbered_list_item': return `${indent}1. ${text}`;
+    case 'to_do': return `${indent}${content.checked ? '✓' : '○'} ${text}`;
+    case 'toggle': return `${indent}▸ ${text}`;
+    case 'quote': return `${indent}> ${text}`;
+    case 'callout': 
+      const emoji = content.icon?.emoji || '📌';
+      return `${indent}${emoji} ${text}`;
+    case 'code': 
+      return `${indent}\`\`\`${content.language || ''}\n${text}\n\`\`\``;
+    case 'divider': return `${indent}---`;
+    case 'table_row':
+      const cells = content.cells?.map(c => c.map(t => t.plain_text).join('')).join(' | ');
+      return cells ? `${indent}| ${cells} |` : '';
+    case 'child_page':
+      return `${indent}📄 [하위 페이지: ${content.title}]`;
+    case 'child_database':
+      return `${indent}📊 [하위 데이터베이스: ${content.title}]`;
+    case 'bookmark':
+      return `${indent}🔗 ${content.url || ''}`;
+    case 'embed':
+      return `${indent}🔗 임베드: ${content.url || ''}`;
+    case 'link_to_page':
+      return `${indent}📎 링크된 페이지`;
+    case 'synced_block':
+      return ''; // 동기화 블록은 내용을 따로 가져와야 함
+    case 'column_list':
+    case 'column':
+      return ''; // 컬럼은 하위 블록에서 처리
+    default:
+      return text ? `${indent}${text}` : '';
+  }
+}
+
+// 블록 컨텐츠 재귀 수집 (페이지네이션 + 깊이 증가)
+async function getBlockContentRecursive(blockId, maxDepth = 4, currentDepth = 0) {
+  if (currentDepth >= maxDepth) {
+    notionStats.maxDepthReached++;
+    return '';
+  }
+  
   try {
-    const since = new Date(Date.now() - (86400000 * days)).toISOString();
+    let allBlocks = [];
+    let cursor = undefined;
+    let pageCount = 0;
     
-    const response = await notion.search({
-      filter: { property: 'object', value: 'page' },
-      sort: { direction: 'descending', timestamp: 'last_edited_time' },
-      page_size: 100,
-    });
-
-    const recentPages = response.results.filter(page => page.last_edited_time >= since);
-    const pagesWithContent = [];
-
-    for (const page of recentPages.slice(0, 30)) {
-      try {
-        const pageInfo = await getPageInfoDeep(page);
-        if (pageInfo) pagesWithContent.push(pageInfo);
-      } catch (err) {}
+    // 페이지네이션으로 모든 블록 가져오기
+    do {
+      const response = await notion.blocks.children.list({
+        block_id: blockId,
+        page_size: 100,
+        start_cursor: cursor,
+      });
+      
+      allBlocks.push(...response.results);
+      cursor = response.has_more ? response.next_cursor : undefined;
+      pageCount++;
+      notionStats.blocksRead += response.results.length;
+      
+      // 너무 많은 페이지 방지
+      if (pageCount >= 5) break;
+      
+    } while (cursor);
+    
+    let content = '';
+    
+    for (const block of allBlocks) {
+      const text = extractTextFromBlockEnhanced(block, currentDepth);
+      if (text) {
+        content += text + '\n';
+      }
+      
+      // 하위 블록 있으면 재귀 (child_page, child_database는 별도 처리)
+      if (block.has_children && 
+          block.type !== 'child_page' && 
+          block.type !== 'child_database') {
+        const childContent = await getBlockContentRecursive(block.id, maxDepth, currentDepth + 1);
+        content += childContent;
+      }
     }
 
-    return pagesWithContent;
+    return content;
   } catch (error) {
-    console.error('Notion 페이지 가져오기 실패:', error);
-    return [];
+    notionStats.errors.push(`블록 ${blockId}: ${error.message}`);
+    return '';
   }
 }
 
-async function getPageInfoDeep(page) {
+// 페이지 댓글 수집 (블록 레벨 댓글 포함)
+async function getPageComments(pageId) {
+  const comments = [];
+  
+  try {
+    // 페이지 레벨 댓글
+    const pageComments = await notion.comments.list({ block_id: pageId });
+    for (const comment of pageComments.results) {
+      comments.push({
+        type: 'page',
+        author: comment.created_by?.id || 'unknown',
+        text: comment.rich_text?.map(t => t.plain_text).join('') || '',
+        createdAt: comment.created_time,
+      });
+      notionStats.commentsRead++;
+    }
+    
+    // 블록 레벨 댓글 (상위 10개 블록만)
+    const blocks = await notion.blocks.children.list({ block_id: pageId, page_size: 10 });
+    for (const block of blocks.results) {
+      try {
+        const blockComments = await notion.comments.list({ block_id: block.id });
+        for (const comment of blockComments.results) {
+          const blockText = extractTextFromBlockEnhanced(block).slice(0, 50);
+          comments.push({
+            type: 'block',
+            blockContext: blockText,
+            author: comment.created_by?.id || 'unknown',
+            text: comment.rich_text?.map(t => t.plain_text).join('') || '',
+            createdAt: comment.created_time,
+          });
+          notionStats.commentsRead++;
+        }
+      } catch (err) {
+        // 블록 댓글 접근 실패 (권한 등)
+      }
+    }
+  } catch (error) {
+    notionStats.errors.push(`댓글 ${pageId}: ${error.message}`);
+  }
+  
+  return comments;
+}
+
+// 페이지 상세 정보 수집 (강화 버전)
+async function getPageInfoDeepV2(page, includeContent = true) {
   try {
     let title = '제목 없음';
     if (page.properties) {
       const titleProp = Object.values(page.properties).find(prop => prop.type === 'title');
       if (titleProp?.title?.[0]) title = titleProp.title[0].plain_text;
     }
+    
+    // child_page 블록인 경우 제목 처리
+    if (page.type === 'child_page' && page.child_page?.title) {
+      title = page.child_page.title;
+    }
 
-    const content = await getBlockContentRecursive(page.id, 2);
+    let content = '';
+    if (includeContent) {
+      content = await getBlockContentRecursive(page.id, 4); // depth 4
+    }
 
-    let comments = [];
-    try {
-      const commentsResponse = await notion.comments.list({ block_id: page.id });
-      comments = commentsResponse.results.map(comment => ({
-        author: comment.created_by?.id || 'unknown',
-        text: comment.rich_text?.map(t => t.plain_text).join('') || '',
-        createdAt: comment.created_time,
-      }));
-    } catch (err) {}
+    const comments = await getPageComments(page.id);
+
+    // 페이지 경로 추출 시도
+    let path = '';
+    if (page.parent) {
+      if (page.parent.type === 'page_id') {
+        path = `상위 페이지: ${page.parent.page_id}`;
+      } else if (page.parent.type === 'database_id') {
+        path = `DB: ${page.parent.database_id}`;
+      } else if (page.parent.type === 'workspace') {
+        path = '워크스페이스 루트';
+      }
+    }
 
     return {
       id: page.id,
       title,
-      content: content.slice(0, 1500),
+      content: content.slice(0, 2500), // 글자 수 증가
       lastEditedTime: page.last_edited_time,
       lastEditedBy: page.last_edited_by?.id || 'unknown',
       comments,
-      url: page.url,
+      url: page.url || `https://notion.so/${page.id.replace(/-/g, '')}`,
+      path,
+      depth: page.depth || 0,
+      isDbItem: page.isDbItem || false,
     };
   } catch (error) {
+    notionStats.errors.push(`페이지 ${page.id}: ${error.message}`);
     return null;
   }
 }
 
-async function getBlockContentRecursive(blockId, maxDepth, currentDepth = 0) {
-  if (currentDepth >= maxDepth) return '';
+// [NEW] 하위 페이지 재귀 탐색
+async function getChildPagesRecursive(parentId, maxDepth = 4, currentDepth = 0, since = null) {
+  if (currentDepth >= maxDepth) {
+    log('DEBUG', 'Notion', `최대 깊이 도달: ${parentId} (depth ${currentDepth})`);
+    return [];
+  }
+  
+  const allPages = [];
   
   try {
-    const blocks = await notion.blocks.children.list({ block_id: blockId, page_size: 50 });
-    let content = '';
+    let cursor = undefined;
+    let pageCount = 0;
     
-    for (const block of blocks.results) {
-      const text = extractTextFromBlock(block);
-      if (text) {
-        const indent = '  '.repeat(currentDepth);
-        content += `${indent}${text}\n`;
+    do {
+      const blocks = await notion.blocks.children.list({
+        block_id: parentId,
+        page_size: 100,
+        start_cursor: cursor,
+      });
+      
+      for (const block of blocks.results) {
+        // 하위 페이지 발견
+        if (block.type === 'child_page') {
+          notionStats.childPagesFound++;
+          
+          // 최근 수정 여부 확인 (since가 있는 경우)
+          const isRecent = !since || new Date(block.last_edited_time) >= new Date(since);
+          
+          if (isRecent) {
+            log('DEBUG', 'Notion', `하위 페이지 발견: ${block.child_page?.title} (depth ${currentDepth + 1})`);
+            
+            const pageInfo = await getPageInfoDeepV2({
+              id: block.id,
+              type: 'child_page',
+              child_page: block.child_page,
+              last_edited_time: block.last_edited_time,
+              last_edited_by: block.last_edited_by,
+              parent: { type: 'page_id', page_id: parentId },
+              properties: {},
+            });
+            
+            if (pageInfo) {
+              pageInfo.depth = currentDepth + 1;
+              pageInfo.parentId = parentId;
+              allPages.push(pageInfo);
+            }
+          }
+          
+          // 재귀적으로 하위 탐색 (최근 수정 여부와 관계없이)
+          const childPages = await getChildPagesRecursive(block.id, maxDepth, currentDepth + 1, since);
+          allPages.push(...childPages);
+        }
+        
+        // 하위 데이터베이스 발견
+        if (block.type === 'child_database') {
+          log('DEBUG', 'Notion', `하위 DB 발견: ${block.child_database?.title} (depth ${currentDepth + 1})`);
+          
+          const dbItems = await getDatabaseItemsWithContent(block.id, since);
+          allPages.push(...dbItems);
+        }
       }
       
-      if (block.has_children) {
-        content += await getBlockContentRecursive(block.id, maxDepth, currentDepth + 1);
+      cursor = blocks.has_more ? blocks.next_cursor : undefined;
+      pageCount++;
+      
+      if (pageCount >= 3) break; // 한 레벨에서 너무 많은 페이지 방지
+      
+    } while (cursor);
+    
+  } catch (error) {
+    notionStats.errors.push(`하위 탐색 ${parentId}: ${error.message}`);
+    log('WARN', 'Notion', `하위 페이지 탐색 실패 (${parentId}): ${error.message}`);
+  }
+  
+  return allPages;
+}
+
+// [NEW] 데이터베이스 아이템 + 내부 컨텐츠
+async function getDatabaseItemsWithContent(databaseId, since = null) {
+  const itemsWithContent = [];
+  
+  try {
+    const queryOptions = {
+      database_id: databaseId,
+      page_size: 20,
+    };
+    
+    // 최근 수정된 것만 필터 (since가 있는 경우)
+    if (since) {
+      queryOptions.filter = {
+        timestamp: 'last_edited_time',
+        last_edited_time: { on_or_after: since },
+      };
+    }
+    
+    const items = await notion.databases.query(queryOptions);
+    
+    for (const item of items.results) {
+      notionStats.dbItemsWithContent++;
+      
+      // 아이템 속성 추출
+      const titleProp = Object.values(item.properties).find(p => p.type === 'title');
+      const title = titleProp?.title?.[0]?.plain_text || '제목 없음';
+      
+      // 주요 속성 추출
+      const properties = extractRelevantProperties(item.properties);
+      
+      // [핵심] 아이템 내부 컨텐츠 읽기
+      const content = await getBlockContentRecursive(item.id, 3);
+      
+      // 댓글 수집
+      const comments = await getPageComments(item.id);
+      
+      itemsWithContent.push({
+        id: item.id,
+        title,
+        content: content.slice(0, 1500),
+        lastEditedTime: item.last_edited_time,
+        properties,
+        comments,
+        isDbItem: true,
+        url: item.url || `https://notion.so/${item.id.replace(/-/g, '')}`,
+      });
+    }
+    
+    log('DEBUG', 'Notion', `DB ${databaseId}: ${itemsWithContent.length}개 아이템 (컨텐츠 포함)`);
+    
+  } catch (error) {
+    notionStats.errors.push(`DB 아이템 ${databaseId}: ${error.message}`);
+  }
+  
+  return itemsWithContent;
+}
+
+// 속성 추출 헬퍼
+function extractRelevantProperties(properties) {
+  const relevant = {};
+  
+  for (const [key, prop] of Object.entries(properties)) {
+    switch (prop.type) {
+      case 'status':
+        if (prop.status?.name) relevant[key] = prop.status.name;
+        break;
+      case 'select':
+        if (prop.select?.name) relevant[key] = prop.select.name;
+        break;
+      case 'multi_select':
+        if (prop.multi_select?.length) relevant[key] = prop.multi_select.map(s => s.name).join(', ');
+        break;
+      case 'date':
+        if (prop.date?.start) relevant[key] = prop.date.start;
+        break;
+      case 'people':
+        if (prop.people?.length) relevant[key] = prop.people.map(p => p.name || p.id).join(', ');
+        break;
+      case 'checkbox':
+        relevant[key] = prop.checkbox ? '✓' : '○';
+        break;
+      case 'number':
+        if (prop.number !== null) relevant[key] = prop.number;
+        break;
+      case 'url':
+        if (prop.url) relevant[key] = prop.url;
+        break;
+      case 'email':
+        if (prop.email) relevant[key] = prop.email;
+        break;
+      case 'rich_text':
+        if (prop.rich_text?.length) relevant[key] = prop.rich_text.map(t => t.plain_text).join('');
+        break;
+    }
+  }
+  
+  return relevant;
+}
+
+// [NEW] 메인 Notion 수집 함수 (통합)
+async function getRecentNotionPagesDeep(days = 1) {
+  // 통계 초기화
+  Object.assign(notionStats, {
+    searchApiPages: 0,
+    childPagesFound: 0,
+    dbItemsWithContent: 0,
+    blocksRead: 0,
+    commentsRead: 0,
+    maxDepthReached: 0,
+    errors: [],
+  });
+  
+  const allPages = [];
+  const since = new Date(Date.now() - (86400000 * days)).toISOString();
+  const seenIds = new Set();
+  
+  log('INFO', 'Notion', `Notion 수집 시작 (since: ${since})`);
+  
+  // 1. 기존 Search API (최상위 레벨)
+  try {
+    const searchResults = await notion.search({
+      filter: { property: 'object', value: 'page' },
+      sort: { direction: 'descending', timestamp: 'last_edited_time' },
+      page_size: 100,
+    });
+    
+    const recentFromSearch = searchResults.results.filter(p => p.last_edited_time >= since);
+    notionStats.searchApiPages = recentFromSearch.length;
+    
+    log('INFO', 'Notion', `Search API: ${recentFromSearch.length}개 페이지 (최근 ${days}일)`);
+    
+    for (const page of recentFromSearch.slice(0, 30)) {
+      if (seenIds.has(page.id)) continue;
+      seenIds.add(page.id);
+      
+      const pageInfo = await getPageInfoDeepV2(page);
+      if (pageInfo) {
+        pageInfo.source = 'search_api';
+        allPages.push(pageInfo);
       }
     }
-
-    return content;
   } catch (error) {
-    return '';
+    log('ERROR', 'Notion', `Search API 실패: ${error.message}`);
   }
-}
-
-function extractTextFromBlock(block) {
-  const type = block.type;
-  const content = block[type];
-  if (!content?.rich_text) return '';
   
-  const text = content.rich_text.map(t => t.plain_text).join('');
+  // 2. 지정된 루트 페이지에서 하위 탐색
+  const rootPageIds = getRootPageIds();
   
-  switch (type) {
-    case 'heading_1': return `# ${text}`;
-    case 'heading_2': return `## ${text}`;
-    case 'heading_3': return `### ${text}`;
-    case 'bulleted_list_item': return `• ${text}`;
-    case 'numbered_list_item': return `- ${text}`;
-    case 'to_do': return `${content.checked ? '✓' : '○'} ${text}`;
-    case 'toggle': return `▸ ${text}`;
-    default: return text;
-  }
-}
-
-async function getNotionDatabases(days = 1) {
-  try {
-    const since = new Date(Date.now() - (86400000 * days)).toISOString();
+  if (rootPageIds.length > 0) {
+    log('INFO', 'Notion', `루트 페이지 탐색 시작: ${rootPageIds.length}개`);
     
-    const response = await notion.search({
+    for (const rootId of rootPageIds) {
+      log('DEBUG', 'Notion', `루트 페이지 탐색: ${rootId}`);
+      
+      try {
+        const childPages = await getChildPagesRecursive(rootId, 4, 0, since);
+        
+        for (const page of childPages) {
+          if (seenIds.has(page.id)) continue;
+          seenIds.add(page.id);
+          
+          page.source = 'recursive_search';
+          allPages.push(page);
+        }
+        
+        log('DEBUG', 'Notion', `루트 ${rootId}: ${childPages.length}개 하위 페이지`);
+      } catch (error) {
+        log('WARN', 'Notion', `루트 ${rootId} 탐색 실패: ${error.message}`);
+      }
+    }
+  } else {
+    log('INFO', 'Notion', 'NOTION_ROOT_PAGES 미설정 - 하위 탐색 스킵');
+  }
+  
+  // 3. 데이터베이스 직접 탐색
+  try {
+    const dbSearch = await notion.search({
       filter: { property: 'object', value: 'database' },
       page_size: 30,
     });
-
-    const databaseSummaries = [];
-
-    for (const db of response.results) {
-      try {
-        let dbTitle = db.title?.[0]?.plain_text || '제목 없음';
-
-        const items = await notion.databases.query({
-          database_id: db.id,
-          filter: {
-            timestamp: 'last_edited_time',
-            last_edited_time: { on_or_after: since },
-          },
-          page_size: 20,
-        });
-
-        if (items.results.length > 0) {
-          const itemSummaries = items.results.map(item => {
-            const titleProp = Object.values(item.properties).find(p => p.type === 'title');
-            const title = titleProp?.title?.[0]?.plain_text || '제목 없음';
-            const statusProp = Object.values(item.properties).find(p => p.type === 'status' || p.type === 'select');
-            const status = statusProp?.status?.name || statusProp?.select?.name || '';
-            const dateProp = Object.values(item.properties).find(p => p.type === 'date');
-            const date = dateProp?.date?.start || '';
-
-            return { title, status, date, lastEdited: item.last_edited_time };
-          });
-
-          databaseSummaries.push({
-            name: dbTitle,
-            recentItems: itemSummaries,
-            totalUpdated: items.results.length,
-          });
-        }
-      } catch (err) {}
+    
+    log('DEBUG', 'Notion', `발견된 데이터베이스: ${dbSearch.results.length}개`);
+    
+    for (const db of dbSearch.results.slice(0, 10)) {
+      const dbItems = await getDatabaseItemsWithContent(db.id, since);
+      
+      for (const item of dbItems) {
+        if (seenIds.has(item.id)) continue;
+        seenIds.add(item.id);
+        
+        item.source = 'database_query';
+        item.databaseName = db.title?.[0]?.plain_text || 'Unknown DB';
+        allPages.push(item);
+      }
     }
-
-    return databaseSummaries;
   } catch (error) {
-    console.error('Notion 데이터베이스 가져오기 실패:', error);
-    return [];
+    log('WARN', 'Notion', `데이터베이스 탐색 실패: ${error.message}`);
   }
+  
+  // 중복 제거 및 정렬
+  const uniquePages = Array.from(
+    new Map(allPages.map(p => [p.id, p])).values()
+  );
+  
+  uniquePages.sort((a, b) => new Date(b.lastEditedTime) - new Date(a.lastEditedTime));
+  
+  // 수집 통계 로깅
+  log('INFO', 'Notion', '=== Notion 수집 통계 ===');
+  log('INFO', 'Notion', `Search API 페이지: ${notionStats.searchApiPages}개`);
+  log('INFO', 'Notion', `하위 페이지 발견: ${notionStats.childPagesFound}개`);
+  log('INFO', 'Notion', `DB 아이템 (컨텐츠 포함): ${notionStats.dbItemsWithContent}개`);
+  log('INFO', 'Notion', `총 블록 읽음: ${notionStats.blocksRead}개`);
+  log('INFO', 'Notion', `댓글 수집: ${notionStats.commentsRead}개`);
+  log('INFO', 'Notion', `최대 깊이 도달: ${notionStats.maxDepthReached}회`);
+  log('INFO', 'Notion', `최종 페이지 수: ${uniquePages.length}개`);
+  
+  if (notionStats.errors.length > 0) {
+    log('WARN', 'Notion', `오류 ${notionStats.errors.length}건:`);
+    notionStats.errors.slice(0, 5).forEach(e => log('WARN', 'Notion', `  - ${e}`));
+  }
+  
+  return {
+    pages: uniquePages.slice(0, 50),
+    stats: { ...notionStats },
+  };
 }
 
+// Notion 사용자 목록
 async function getNotionUsers() {
   try {
     const response = await notion.users.list();
@@ -887,10 +1223,11 @@ async function getNotionUsers() {
 }
 
 // ============================================
-// Claude 분석 (의사결정 지원 시스템)
+// Claude 분석
 // ============================================
 async function analyzeWithClaude(slackMessages, ceoDMs, notionData, revenueData, calendarData, days = 1) {
-  const { pages, databases, users } = notionData;
+  const { pages, stats: notionStats } = notionData;
+  const users = await getNotionUsers();
 
   // Slack 포맷팅
   let slackSection = '메시지 없음';
@@ -914,31 +1251,40 @@ async function analyzeWithClaude(slackMessages, ceoDMs, notionData, revenueData,
     }).join('\n');
   }
 
-  // Notion 포맷팅
+  // [NEW] Notion 포맷팅 (깊이 정보 포함)
   let notionPagesSection = '업데이트된 페이지 없음';
   if (pages.length > 0) {
     notionPagesSection = pages.map(p => {
       const editor = users[p.lastEditedBy] || '알 수 없음';
-      let section = `[${p.title}] (수정: ${editor})\n내용: ${p.content.slice(0, 500)}`;
-      if (p.comments.length > 0) {
-        section += `\n댓글 (${p.comments.length}개):\n`;
-        section += p.comments.map(c => `  - ${users[c.author] || '익명'}: ${c.text}`).join('\n');
+      const depthIndicator = p.depth ? `(depth ${p.depth})` : '';
+      const sourceIndicator = p.source ? `[${p.source}]` : '';
+      const dbIndicator = p.isDbItem ? `[DB: ${p.databaseName || 'DB아이템'}]` : '';
+      
+      let section = `📄 [${p.title}] ${depthIndicator} ${sourceIndicator} ${dbIndicator}`;
+      section += `\n   수정: ${editor} | ${p.lastEditedTime}`;
+      
+      if (p.properties && Object.keys(p.properties).length > 0) {
+        section += `\n   속성: ${JSON.stringify(p.properties)}`;
       }
+      
+      if (p.content) {
+        section += `\n   내용:\n${p.content.split('\n').map(line => '   ' + line).join('\n').slice(0, 800)}`;
+      }
+      
+      if (p.comments && p.comments.length > 0) {
+        section += `\n   💬 댓글 (${p.comments.length}개):`;
+        p.comments.slice(0, 3).forEach(c => {
+          const author = users[c.author] || '익명';
+          const context = c.blockContext ? ` (블록: "${c.blockContext}...")` : '';
+          section += `\n      - ${author}${context}: ${c.text}`;
+        });
+      }
+      
       return section;
     }).join('\n\n');
   }
 
-  let notionDbSection = '업데이트된 데이터베이스 없음';
-  if (databases.length > 0) {
-    notionDbSection = databases.map(db => {
-      const items = db.recentItems.map(item => 
-        `  - ${item.title}${item.status ? ` [${item.status}]` : ''}${item.date ? ` (${item.date})` : ''}`
-      ).join('\n');
-      return `[${db.name}] (${db.totalUpdated}개 업데이트)\n${items}`;
-    }).join('\n\n');
-  }
-
-  // 매출 데이터 포맷팅 (목표 대비 분석 포함)
+  // 매출 데이터 포맷팅
   let revenueSection = '매출 데이터 없음';
   if (revenueData?.data?.length > 0) {
     const stats = revenueData.stats;
@@ -976,17 +1322,14 @@ ${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}`;
 
   // 캘린더 데이터 포맷팅
   let calendarSection = '캘린더 데이터 없음';
-  console.log('📅 캘린더 데이터 확인:', calendarData ? `있음 (오늘 ${calendarData.today?.length}건)` : '없음');
-  
   if (calendarData && calendarData.today) {
     const todayList = calendarData.today.length > 0
       ? calendarData.today.map(e => {
-          const typeTag = e.eventType === 'meeting' ? '🟠' :   // 주황 = 미팅
-                         e.eventType === 'product' ? '🟣' :    // 보라 = 프로덕트
-                         e.eventType === 'ops' ? '🔵' :        // 파랑/회색 = 운영
-                         e.eventType === 'growth' ? '🟢' :     // 초록 = 자기계발
-                         e.eventType === 'personal' ? '🟡' :   // 노랑/분홍 = 여가
-                         '⚪';
+          const typeTag = e.eventType === 'meeting' ? '🟠' :
+                         e.eventType === 'product' ? '🟣' :
+                         e.eventType === 'ops' ? '🔵' :
+                         e.eventType === 'growth' ? '🟢' :
+                         e.eventType === 'personal' ? '🟡' : '⚪';
           return `  ${typeTag} ${e.startStr}: ${e.title} (${e.duration}분)${e.attendees.length > 0 ? ` [${e.attendees.map(a => a.name).join(', ')}]` : ''}`;
         }).join('\n')
       : '  (일정 없음)';
@@ -996,8 +1339,7 @@ ${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}`;
                      e.eventType === 'product' ? '🟣' :
                      e.eventType === 'ops' ? '🔵' :
                      e.eventType === 'growth' ? '🟢' :
-                     e.eventType === 'personal' ? '🟡' :
-                     '⚪';
+                     e.eventType === 'personal' ? '🟡' : '⚪';
       return `  ${typeTag} ${e.startStr}: ${e.title}${e.attendees.length > 0 ? ` [${e.attendees.map(a => a.name).join(', ')}]` : ''}`;
     }).join('\n');
 
@@ -1005,17 +1347,17 @@ ${recentDays.map(d => `  ${d.date}: ${formatWon(d.total)}`).join('\n')}`;
       ? calendarData.freeSlots.map(s => `  - ${s.date} ${s.start}부터 ${s.duration}`).join('\n')
       : '  (빈 시간 없음)';
 
-    const hbt = calendarData.stats?.hoursByType || { meeting: 0, product: 0, ops: 0, growth: 0, personal: 0 };
+    const hbt = calendarData.stats?.hoursByType || {};
     
     calendarSection = `[오늘 일정] (🟠미팅 🟣프로덕트 🔵운영 🟢자기계발 🟡여가)
 ${todayList}
 
 [이번 주 시간 배분]
-- 🟠 실제 미팅: ${hbt.meeting}시간
-- 🟣 프로덕트(기획/리서치): ${hbt.product}시간
-- 🔵 운영업무(HR/경영지원): ${hbt.ops}시간
-- 🟢 자기계발: ${hbt.growth}시간
-- 🟡 여가: ${hbt.personal}시간
+- 🟠 실제 미팅: ${hbt.meeting || 0}시간
+- 🟣 프로덕트: ${hbt.product || 0}시간
+- 🔵 운영업무: ${hbt.ops || 0}시간
+- 🟢 자기계발: ${hbt.growth || 0}시간
+- 🟡 여가: ${hbt.personal || 0}시간
 - 전체: ${calendarData.stats?.totalScheduledHours || 0}시간
 
 [향후 주요 일정]
@@ -1023,15 +1365,9 @@ ${upcomingList}
 
 [집중 가능 시간대]
 ${freeSlotsList}`;
-
-    console.log('📅 캘린더 섹션 생성 완료:', calendarSection.slice(0, 200) + '...');
-  } else {
-    console.log('📅 캘린더 데이터 없음 - calendarData:', !!calendarData, 'today:', !!calendarData?.today);
   }
 
-  // ============================================
-  // 의사결정 지원 프롬프트
-  // ============================================
+  // Claude 프롬프트
   const prompt = `당신은 월 2~3억 매출의 Web3 스타트업 CEO의 Chief of Staff입니다.
 CEO가 아침에 읽고 바로 의사결정하고 행동할 수 있는 브리핑을 작성합니다.
 
@@ -1042,9 +1378,10 @@ CEO가 아침에 읽고 바로 의사결정하고 행동할 수 있는 브리핑
 4. CEO 시간 배분 가이드 제공
 5. 스레드 맥락 파악 - 결론 난 건 [해결됨] 표시
 6. 캘린더 데이터가 있으면 반드시 오늘 일정과 미팅 브리프에 포함할 것
+7. Notion 페이지의 깊이(depth)와 출처(source)를 참고하여 중요도 판단
 
 ═══════════════════════════════════
-[CEO 캘린더] ★ 중요: 아래 일정을 "오늘 일정"과 "미팅 브리프"에 반드시 반영하세요
+[CEO 캘린더]
 ═══════════════════════════════════
 ${calendarSection}
 
@@ -1064,14 +1401,9 @@ ${slackSection}
 ${dmSection}
 
 ═══════════════════════════════════
-[Notion 페이지 업데이트]
+[Notion 페이지 업데이트] (수집 통계: Search API ${notionStats.searchApiPages}개, 하위페이지 ${notionStats.childPagesFound}개, DB아이템 ${notionStats.dbItemsWithContent}개)
 ═══════════════════════════════════
 ${notionPagesSection}
-
-═══════════════════════════════════
-[Notion 데이터베이스 변경]
-═══════════════════════════════════
-${notionDbSection}
 
 ═══════════════════════════════════
 
@@ -1082,11 +1414,11 @@ ${notionDbSection}
 ## 1) 핵심 지표 현황
 매출:
 - 어제: [금액] | 전일대비: [%] | 7일평균대비: [%]
-- 월 목표 ${revenueData?.monthlyAnalysis ? formatWon(revenueData.monthlyAnalysis.target) : '미설정'} 대비: MTD [금액] ([%])
+- 월 목표 대비: MTD [금액] ([%])
 - 목표 달성 전망: [달성 가능/⚠ 미달 예상 - 근거]
 
-오늘 일정: [N]건, 미팅 시간 [N]시간 (캘린더 데이터가 있으면 반드시 건수와 시간 표시)
-집중 가능 시간: [시간대] (캘린더 데이터가 있으면 반드시 표시)
+오늘 일정: [N]건, 미팅 시간 [N]시간
+집중 가능 시간: [시간대]
 
 ## 2) 의사결정 필요 (우선순위순)
 
@@ -1098,12 +1430,9 @@ ${notionDbSection}
 추천: [A/B] - [근거 1줄]
 담당: [이름] | 결정 기한: [날짜]
 
-(의사결정 필요 없으면 "오늘 결정할 사항 없음")
-
 ## 3) 실행 추적
 
 ### 즉시 (오늘)
-- [ ] [할일] → [담당] | [시간/기한]
 - [ ] [할일] → [담당] | [시간/기한]
 
 ### 단기 (이번주)
@@ -1111,8 +1440,6 @@ ${notionDbSection}
 
 ### 중기 (2주)
 - [ ] [할일] → [담당] | [날짜]까지
-
-(해당 없으면 항목 생략)
 
 ## 4) 금주 CEO 시간 배분 권장
 
@@ -1128,12 +1455,9 @@ ${notionDbSection}
 - 현황: 1줄
 - 주시 포인트: 무엇을 지켜봐야 하는지
 
-(리스크 없으면 "주요 리스크 없음")
-
 ## 6) 오늘의 미팅 브리프
-(캘린더 데이터가 있으면 반드시 아래 형식으로 각 미팅 정리. 없으면 "오늘 미팅 없음"만 표시)
 
-[시간] 미팅명 (🟠/🟣/🔵/🟢/🟡 색상 표시)
+[시간] 미팅명
 - 목적/아젠다: 
 - 준비 필요: 
 - 원하는 결과:
@@ -1154,7 +1478,7 @@ ${notionDbSection}
 
     return message.content[0].text;
   } catch (error) {
-    console.error('Claude 분석 실패:', error);
+    log('ERROR', 'Claude', `Claude 분석 실패: ${error.message}`);
     return '분석 중 오류가 발생했습니다.';
   }
 }
@@ -1170,9 +1494,11 @@ async function sendDMToCEO(analysis, stats) {
     const dayName = dayNames[today.getDay()];
     const headerText = `📊 CEO 대시보드 (${dateStr} ${dayName})`;
     
-    let statsText = `Slack ${stats.slackCount} | DM ${stats.dmCount} | Notion ${stats.notionPages} | 스레드 ${stats.threadCount}`;
+    let statsText = `Slack ${stats.slackCount} | DM ${stats.dmCount} | Notion ${stats.notionPages}`;
+    statsText += ` (Search ${stats.notionStats?.searchApiPages || 0} + Child ${stats.notionStats?.childPagesFound || 0} + DB ${stats.notionStats?.dbItemsWithContent || 0})`;
+    
     if (stats.revenueDataAvailable) {
-      statsText += ` | 매출 ${stats.hasYesterdayData ? '✓' : '(어제 데이터 없음)'}`;
+      statsText += ` | 매출 ${stats.hasYesterdayData ? '✓' : '(어제 없음)'}`;
     }
     if (stats.calendarAvailable) {
       statsText += ` | 캘린더 ✓`;
@@ -1200,13 +1526,12 @@ async function sendDMToCEO(analysis, stats) {
           type: 'context',
           elements: [{
             type: 'mrkdwn',
-            text: `${new Date().toLocaleString('ko-KR')} | Claude Sonnet 4`,
+            text: `${new Date().toLocaleString('ko-KR')} | Claude Sonnet 4 | Notion Deep Scan v2`,
           }],
         },
       ],
     });
 
-    // 긴 메시지 분할 발송
     if (analysis.length > 3000) {
       const remaining = analysis.slice(3000);
       const chunks = remaining.match(/.{1,3000}/g) || [];
@@ -1218,9 +1543,9 @@ async function sendDMToCEO(analysis, stats) {
       }
     }
 
-    console.log('CEO에게 DM 발송 완료');
+    log('INFO', 'Slack', 'CEO에게 DM 발송 완료');
   } catch (error) {
-    console.error('DM 발송 실패:', error);
+    log('ERROR', 'Slack', `DM 발송 실패: ${error.message}`);
   }
 }
 
@@ -1230,108 +1555,89 @@ async function sendDMToCEO(analysis, stats) {
 module.exports = async (req, res) => {
   const days = Math.min(parseInt(req.query?.days || req.body?.days) || 1, 30);
 
-  console.log('='.repeat(50));
-  console.log(`📊 CEO 대시보드 생성 시작`);
-  console.log(`📆 분석 기간: ${days}일`);
-  console.log(`📅 현재 시각 (KST): ${getKSTDate().toISOString()}`);
-  console.log('='.repeat(50));
+  console.log('='.repeat(60));
+  log('INFO', 'Main', `CEO 대시보드 생성 시작 (v2 - Deep Notion Scan)`);
+  log('INFO', 'Main', `분석 기간: ${days}일`);
+  log('INFO', 'Main', `현재 시각 (KST): ${getKSTDate().toISOString()}`);
+  console.log('='.repeat(60));
 
   try {
     // 0. 캘린더 데이터 수집
-    console.log('\n📅 캘린더 데이터 수집 중...');
+    log('INFO', 'Main', '캘린더 데이터 수집 중...');
     const calendarData = await getCalendarEvents(days, 7);
-    if (calendarData) {
-      console.log(`✅ 캘린더: 오늘 ${calendarData.today.length}건, 예정 ${calendarData.upcoming.length}건`);
-    }
 
     // 1. 매출 데이터 수집
-    console.log('\n💰 매출 데이터 수집 중...');
+    log('INFO', 'Main', '매출 데이터 수집 중...');
     const revenueData = await getRevenueData(Math.max(days, 7));
-    if (revenueData) {
-      console.log(`✅ 매출 데이터: ${revenueData.data.length}일치`);
-      console.log(`   월 목표 대비: ${revenueData.monthlyAnalysis.progress}%`);
-    }
 
     // 2. Slack 메시지 수집
-    console.log('\n📱 Slack 메시지 수집 중...');
+    log('INFO', 'Main', 'Slack 메시지 수집 중...');
     const { messages: slackMessages, userMap } = await getSlackMessages(days);
-    const slackThreadCount = slackMessages.filter(m => m.isThread).length;
-    console.log(`✅ Slack: ${slackMessages.length}개 (스레드 ${slackThreadCount}개)`);
 
     // 3. CEO DM 수집
-    console.log('\n💬 CEO DM 수집 중...');
+    log('INFO', 'Main', 'CEO DM 수집 중...');
     const ceoDMs = await getCEODirectMessages(userMap, days);
-    const dmThreadCount = ceoDMs.filter(m => m.isThread).length;
-    console.log(`✅ CEO DM: ${ceoDMs.length}개 (스레드 ${dmThreadCount}개)`);
 
-    // 4. Notion 데이터 수집
-    console.log('\n👥 Notion 사용자 목록...');
-    const notionUsers = await getNotionUsers();
-
-    console.log('\n📝 Notion 페이지 수집 중...');
-    const notionPages = await getRecentNotionPages(days);
-    console.log(`✅ Notion 페이지: ${notionPages.length}개`);
-
-    console.log('\n📊 Notion 데이터베이스 수집 중...');
-    const notionDatabases = await getNotionDatabases(days);
-    console.log(`✅ Notion DB: ${notionDatabases.length}개`);
+    // 4. [NEW] Notion 깊은 수집
+    log('INFO', 'Main', 'Notion 깊은 수집 중...');
+    const notionData = await getRecentNotionPagesDeep(days);
 
     // 5. Claude 분석
-    console.log('\n🤖 Claude 분석 중...');
+    log('INFO', 'Main', 'Claude 분석 중...');
     const analysis = await analyzeWithClaude(
       slackMessages, 
       ceoDMs, 
-      { pages: notionPages, databases: notionDatabases, users: notionUsers },
+      notionData,
       revenueData,
       calendarData,
       days
     );
-    console.log('✅ 분석 완료');
 
     // 6. CEO에게 발송
-    console.log('\n📤 CEO에게 DM 발송 중...');
+    log('INFO', 'Main', 'CEO에게 DM 발송 중...');
     await sendDMToCEO(analysis, {
       slackCount: slackMessages.length,
       dmCount: ceoDMs.length,
-      notionPages: notionPages.length,
-      notionDbs: notionDatabases.length,
+      notionPages: notionData.pages.length,
+      notionStats: notionData.stats,
       days,
       revenueDataAvailable: !!revenueData,
       hasYesterdayData: revenueData?.hasYesterdayData || false,
-      threadCount: slackThreadCount + dmThreadCount,
       calendarAvailable: !!calendarData,
-      todayMeetings: calendarData?.today.length || 0,
     });
 
-    console.log('\n✅ 완료!');
+    log('INFO', 'Main', '완료!');
 
     res.status(200).json({
       success: true,
       days,
       stats: {
         slackMessages: slackMessages.length,
-        slackThreads: slackThreadCount,
         ceoDMs: ceoDMs.length,
-        dmThreads: dmThreadCount,
-        notionPages: notionPages.length,
-        notionDatabases: notionDatabases.length,
+        notion: {
+          totalPages: notionData.pages.length,
+          searchApiPages: notionData.stats.searchApiPages,
+          childPagesFound: notionData.stats.childPagesFound,
+          dbItemsWithContent: notionData.stats.dbItemsWithContent,
+          blocksRead: notionData.stats.blocksRead,
+          commentsRead: notionData.stats.commentsRead,
+          errors: notionData.stats.errors.length,
+        },
         calendar: calendarData ? {
           today: calendarData.today.length,
           upcoming: calendarData.upcoming.length,
-          meetingHours: calendarData.stats.meetingHoursThisWeek,
         } : null,
-        revenueData: revenueData ? {
+        revenue: revenueData ? {
           days: revenueData.data.length,
-          latestTotal: revenueData.stats?.latestTotal,
-          latestDate: revenueData.stats?.latestDate,
           hasYesterdayData: revenueData.hasYesterdayData,
-          monthlyProgress: revenueData.monthlyAnalysis?.progress,
         } : null,
       },
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    console.error('❌ 실패:', error);
+    log('ERROR', 'Main', `실패: ${error.message}`);
+    console.error(error.stack);
+    
     res.status(500).json({
       success: false,
       error: error.message,
