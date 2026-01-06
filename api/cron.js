@@ -389,7 +389,7 @@ async function getRevenueData(days = 7) {
 }
 
 // ============================================
-// [NEW] 1Q 목표 시트 데이터 수집
+// [UPDATED] 1Q 목표 시트 데이터 수집 - 시트 이름 자동 감지
 // ============================================
 async function getQuarterlyTargetData() {
   try {
@@ -408,8 +408,23 @@ async function getQuarterlyTargetData() {
     const sheets = google.sheets({ version: 'v4', auth });
     const spreadsheetId = '1Vm5hi9Dwqx7OGErtz6f8PrJpegWJdKZKCwaDUAr-oc8';
     
-    // 전체 시트 데이터 가져오기
-    const range = '시트1!A:G';
+    // 먼저 스프레드시트 메타데이터로 첫 번째 시트 이름 가져오기
+    let sheetName = '시트1';
+    try {
+      const meta = await sheets.spreadsheets.get({
+        spreadsheetId,
+        fields: 'sheets.properties.title',
+      });
+      if (meta.data.sheets && meta.data.sheets.length > 0) {
+        sheetName = meta.data.sheets[0].properties.title;
+        log('INFO', 'Target', `시트 이름 감지: ${sheetName}`);
+      }
+    } catch (metaErr) {
+      log('WARN', 'Target', `시트 메타데이터 가져오기 실패, 기본값 사용: ${metaErr.message}`);
+    }
+    
+    // 전체 시트 데이터 가져오기 (A~G열, 50행까지)
+    const range = `'${sheetName}'!A1:G50`;
     
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId,
@@ -418,69 +433,88 @@ async function getQuarterlyTargetData() {
 
     const rows = response.data.values;
     if (!rows || rows.length < 10) {
-      log('WARN', 'Target', '목표 시트 데이터 부족');
+      log('WARN', 'Target', `목표 시트 데이터 부족: ${rows?.length || 0}행`);
       return null;
     }
 
-    // 현재 월 확인 (1월 = B열, 2월 = C열, ...)
+    log('INFO', 'Target', `목표 시트 로드 성공: ${rows.length}행`);
+
+    // 현재 월 확인 (1월 = B열(index 1), 2월 = C열(index 2), ...)
     const kstNow = getKSTDate();
     const currentMonth = kstNow.getMonth() + 1; // 1-12
-    const currentMonthColIndex = currentMonth; // B=1, C=2, ...
+    const colIndex = currentMonth; // B=1, C=2, D=3...
     
-    // 데이터 파싱 (행 번호는 0-indexed)
+    // 데이터 파싱 헬퍼 (0-indexed 행 번호)
+    const getVal = (rowIdx) => {
+      const val = rows[rowIdx]?.[colIndex];
+      return parseNumber(val);
+    };
+    
+    const getLabel = (rowIdx) => {
+      return rows[rowIdx]?.[0] || '';
+    };
+
+    // 시트 구조 (스크린샷 기준, 1-indexed → 0-indexed)
     // Row 3 (index 2): 매출
     // Row 4 (index 3): 비용
     // Row 5 (index 4): 영업 손익
     // Row 7 (index 6): 재무 손익
     // Row 8 (index 7): 캐시플랜(자금조달)
     // Row 9 (index 8): 월말잔고
-    
-    const getVal = (rowIdx, colIdx) => {
-      const val = rows[rowIdx]?.[colIdx];
-      return parseNumber(val);
-    };
+    // Row 13 (index 12): SuperWalk 매출
+    // Row 14 (index 13): PRO 매출
+    // Row 15 (index 14): BASIC 매출
+    // Row 17 (index 16): Defi 매출
+    // Row 45 (index 44): 손익 (SuperWalk-Pro)
+    // Row 46 (index 45): 손익 (SuperWalk-Basic)
 
     const currentMonthData = {
-      revenue: getVal(2, currentMonthColIndex),
-      cost: getVal(3, currentMonthColIndex),
-      operatingProfit: getVal(4, currentMonthColIndex),
-      financialProfit: getVal(6, currentMonthColIndex),
-      fundraising: getVal(7, currentMonthColIndex),
-      monthEndBalance: getVal(8, currentMonthColIndex),
+      // 요약 지표
+      totalRevenue: getVal(2),           // 총 매출
+      totalCost: getVal(3),              // 총 비용
+      operatingProfit: getVal(4),        // 영업 손익
+      financialProfit: getVal(6),        // 재무 손익
+      fundraising: getVal(7),            // 캐시플랜(자금조달)
+      monthEndBalance: getVal(8),        // 월말잔고
+      
+      // 세부 매출
+      superwalkRevenue: getVal(12),      // SuperWalk 총매출
+      proRevenue: getVal(13),            // Pro 모드 매출
+      basicRevenue: getVal(14),          // Basic 모드 매출
+      defiRevenue: getVal(16),           // Defi 매출
+      
+      // 손익
+      proPnL: getVal(44),                // Pro 손익
+      basicPnL: getVal(45),              // Basic 손익
     };
 
-    // 1Q 합계 (1월~3월)
+    // 1Q 합계 (1월~3월, B~D열 = index 1~3)
+    const getQ1Sum = (rowIdx) => {
+      return parseNumber(rows[rowIdx]?.[1]) + 
+             parseNumber(rows[rowIdx]?.[2]) + 
+             parseNumber(rows[rowIdx]?.[3]);
+    };
+
     const q1Data = {
-      revenue: getVal(2, 1) + getVal(2, 2) + getVal(2, 3),
-      cost: getVal(3, 1) + getVal(3, 2) + getVal(3, 3),
-      operatingProfit: getVal(4, 1) + getVal(4, 2) + getVal(4, 3),
-      fundraising: getVal(7, 1) + getVal(7, 2) + getVal(7, 3),
+      totalRevenue: getQ1Sum(2),
+      totalCost: getQ1Sum(3),
+      operatingProfit: getQ1Sum(4),
+      fundraising: getQ1Sum(7),
     };
 
-    // SuperWalk Pro/Basic 세부 (Row 14-15, index 13-14)
-    const superwalkPro = getVal(13, currentMonthColIndex);
-    const superwalkBasic = getVal(14, currentMonthColIndex);
-
-    // 손익 (Row 45-46, index 44-45)
-    const profitPro = getVal(44, currentMonthColIndex);
-    const profitBasic = getVal(45, currentMonthColIndex);
-
-    log('INFO', 'Target', `1Q 목표 데이터 로드 완료 - ${currentMonth}월`);
+    log('INFO', 'Target', `${currentMonth}월 목표 - 매출: ${formatWon(currentMonthData.totalRevenue)}, 자금조달: ${formatWon(currentMonthData.fundraising)}`);
 
     return {
       currentMonth: {
         month: currentMonth,
         ...currentMonthData,
-        superwalkPro,
-        superwalkBasic,
-        profitPro,
-        profitBasic,
       },
       q1: q1Data,
       raw: rows,
     };
   } catch (error) {
     log('ERROR', 'Target', `1Q 목표 시트 가져오기 실패: ${error.message}`);
+    log('ERROR', 'Target', error.stack);
     return null;
   }
 }
@@ -659,7 +693,7 @@ async function getRecentNotionPagesDeep(days = 1) {
 }
 
 // ============================================
-// Claude 분석 (새 템플릿)
+// Claude 분석 (새 템플릿 - ### 제거, 캐시플랜 대조 추가)
 // ============================================
 async function analyzeWithClaude(slackMessages, ceoDMs, notionData, revenueData, calendarData, targetData, days = 1) {
   const { pages } = notionData;
@@ -707,16 +741,18 @@ MTD: ${formatWon(r.monthlyAnalysis.mtd)} / ${formatWon(r.monthlyAnalysis.target)
   if (targetData) {
     const t = targetData.currentMonth;
     targetSummary = `${t.month}월 목표:
-- 매출 목표: ${formatWon(t.revenue)}
+- 회사 총매출 목표: ${formatWon(t.totalRevenue)}
+- SuperWalk 매출 목표: ${formatWon(t.superwalkRevenue)}
+  - Pro 모드: ${formatWon(t.proRevenue)}
+  - Basic 모드: ${formatWon(t.basicRevenue)}
+- Defi 매출 목표: ${formatWon(t.defiRevenue)}
 - 영업손익 목표: ${formatWon(t.operatingProfit)}
-- 캐시플랜(자금조달): ${formatWon(t.fundraising)}
+- 캐시플랜(자금조달) 목표: ${formatWon(t.fundraising)}
 - 월말잔고 목표: ${formatWon(t.monthEndBalance)}
-- SuperWalk Pro 목표: ${formatWon(t.superwalkPro)}
-- SuperWalk Basic 목표: ${formatWon(t.superwalkBasic)}
 
 1Q 전체 목표:
-- 매출: ${formatWon(targetData.q1.revenue)}
-- 자금조달: ${formatWon(targetData.q1.fundraising)}`;
+- 총매출: ${formatWon(targetData.q1.totalRevenue)}
+- 총 자금조달: ${formatWon(targetData.q1.fundraising)}`;
   }
 
   // 오늘 미팅 요약
@@ -733,7 +769,7 @@ MTD: ${formatWon(r.monthlyAnalysis.mtd)} / ${formatWon(r.monthlyAnalysis.target)
 아래 데이터를 기반으로 CEO가 아침에 3분 안에 읽고 바로 행동할 수 있는 간결한 브리핑을 작성하세요.
 
 [CEO 컨텍스트]
-- 교보생명 PoC 데드라인: 1월 13일 (D-6)
+- 교보생명 PoC: 1차 종료, 2/2 새 캠페인 준비 중
 - 최근 구조조정 완료 (23명 → 17명)
 - 2026년 목표: MAU 300K, 월 광고매출 3-4억, Q4 흑자전환
 - 성향: 데이터 기반, 직접적 피드백 선호
@@ -745,10 +781,10 @@ ${dateStr}
 "${quote.quote}" — ${quote.author}
 
 ═══════════════════════════════════
-[매출 현황]
+[매출 현황 - 실제 발생]
 ${revenueSummary}
 
-[1Q 목표 시트]
+[1Q 목표 시트 - 계획]
 ${targetSummary}
 
 [오늘 미팅 (주황색 일정만)]
@@ -764,11 +800,24 @@ ${dmSummary.slice(0, 1500)}
 ${notionSummary}
 ═══════════════════════════════════
 
-아래 형식으로 브리핑을 작성하세요. **볼드 사용 금지**, 간결하게.
+아래 형식으로 브리핑을 작성하세요.
+
+[중요 규칙]
+- **볼드 사용 금지**
+- ### 또는 # 기호 사용 금지 (이모지가 이미 있으므로)
+- 전체 분량: 최대 700단어
+- 금액은 ₩2.6억, ₩540만 형식
+- 담당자/기한 없는 액션 아이템 금지
+- 불확실한 정보는 "⚠️ 확인 필요" 표시
+
+[재무 대조 규칙]
+- 대화에서 투자/자금조달 언급이 있으면, 1Q 목표 시트의 '캐시플랜(자금조달)' 목표와 대조해서 진행률 코멘트
+- 대화에서 비용/지출 언급이 있으면, 월말잔고 목표와 현재 상황 대조해서 리스크 코멘트
+- 매출 목표 대비 실제 매출 진행률이 낮으면 경고
 
 ---
 
-## 🚀 Tim CEO Morning Brief (${dateStr})
+🚀 Tim CEO Morning Brief (${dateStr})
 
 > "[상황 요약 - 한 줄로 오늘의 핵심 메시지]"
 > 
@@ -776,7 +825,7 @@ ${notionSummary}
 
 ---
 
-### ⚡️ Today's Focus Mode: [전투/방어/사색 중 택1]
+⚡️ Today's Focus Mode: [전투/방어/사색 중 택1]
 
 "[오늘 모드에 맞는 한 줄 조언]"
 
@@ -786,7 +835,7 @@ ${notionSummary}
 
 ---
 
-### 📊 Key Metrics
+📊 Key Metrics
 
 매출 현황
 - 어제: [금액] (전일비 [+/-N]%)
@@ -796,12 +845,12 @@ ${notionSummary}
 1Q 목표 대비
 - [월] 매출 목표: [금액] → 현재 [금액] ([N]%)
 - 영업손익 목표: [금액]
-- 캐시플랜: [목표금액] 중 [확보금액] 확보
+- 캐시플랜: [목표금액] 중 [확보금액] 확보 ([진행률 또는 리스크 코멘트])
 - 월말잔고 목표: [금액]
 
 ---
 
-### 🎯 Critical Decisions
+🎯 Critical Decisions
 
 1. 🔴 [가장 긴급한 이슈] ([마감시한])
 - A) [옵션A] → [결과]
@@ -809,21 +858,13 @@ ${notionSummary}
 - 👉 추천: [A/B] ([한 줄 근거])
 
 2. 🟡 [두번째 이슈] ([마감시한])
-- A) [옵션A] → [결과]
-- B) [옵션B] → [결과]
-- 👉 추천: [A/B]
-
-3. 🟢 [세번째 이슈] ([마감시한])
 - 👉 추천: [권고사항]
 
 (의사결정 필요 없으면 이 섹션 생략)
 
 ---
 
-### 📅 Today's Meetings
-
-- [시간] [미팅명] [내부/외부/외부-화상]
-  - 목표: [이 미팅에서 얻어야 할 것]
+📅 Today's Meetings
 
 - [시간] [미팅명] [내부/외부/외부-화상]
   - 목표: [이 미팅에서 얻어야 할 것]
@@ -832,7 +873,7 @@ ${notionSummary}
 
 ---
 
-### 🚨 Risk Monitor
+🚨 Risk Monitor
 
 - 🔴 [가장 심각한 리스크]: [현황 한 줄]
 - 🟡 [주의 필요]: [현황 한 줄]
@@ -840,16 +881,7 @@ ${notionSummary}
 
 ---
 
-> 💡 [오늘 CEO가 집중해야 할 핵심 한 줄 요약]
-
----
-
-[작성 규칙]
-- 전체 분량: 최대 800단어
-- 볼드(**) 사용 금지
-- 모든 금액은 formatWon 형식 (₩2.6억, ₩540만 등)
-- 담당자/기한 없는 액션 아이템 금지
-- 불확실한 정보는 "⚠️ 확인 필요" 표시`;
+> 💡 [오늘 CEO가 집중해야 할 핵심 한 줄 요약]`;
 
   try {
     const message = await anthropic.messages.create({
