@@ -960,7 +960,7 @@ async function sendDMToCEO(analysis, stats) {
 // 메인 핸들러
 // ============================================
 module.exports = async (req, res) => {
-  const days = Math.min(parseInt(req.query?.days || req.body?.days) || 1, 30);
+  const days = Math.min(parseInt(req.query?.days || req.body?.days) || 7, 30);
 
   console.log('='.repeat(60));
   log('INFO', 'Main', `CEO Morning Brief 생성 시작`);
