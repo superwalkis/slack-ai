@@ -892,8 +892,9 @@ ${notionSummary}
 
     return message.content[0].text;
   } catch (error) {
-    log('ERROR', 'Claude', `Claude 분석 실패: ${error.message}`);
-    return '분석 중 오류가 발생했습니다.';
+  log('ERROR', 'Claude', `Claude 분석 실패: ${error.message}`);
+  // 에러 상세를 리턴해서 Slack으로 보이게
+  return `분석 중 오류가 발생했습니다.\n\n🔧 Debug Info:\n- Error: ${error.message}\n- Code: ${error.status || 'N/A'}\n- Type: ${error.constructor.name}`;
   }
 }
 
